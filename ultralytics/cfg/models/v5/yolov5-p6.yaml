@@ -2,9 +2,10 @@
 # YOLOv5 object detection model with P3-P6 outputs. For details see https://docs.ultralytics.com/models/yolov5
 
 # Parameters
-nc: 80  # number of classes
+nc: 20  # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolov5n-p6.yaml' will call yolov5-p6.yaml with scale 'n'
   # [depth, width, max_channels]
+  p: [0.1, 0.1, 1024]
   n: [0.33, 0.25, 1024]
   s: [0.33, 0.50, 1024]
   m: [0.67, 0.75, 1024]
