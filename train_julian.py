@@ -12,23 +12,26 @@ import wandb
 wandb.init()
 run = wandb.init(
     # Set the project where this run will be logged
-    project="gapyolo-tinyissimoyolo",
+    project="ultralytics-test",
     )
 
 from ultralytics import YOLO
 
 # Load a model
-model = YOLO('tinyissimoyolo.yaml')  # load a pretrained model (recommended for training)
+model = YOLO('tinyissimoyolo.yaml').load('runs/detect/train/weights/best.pt')  # load a pretrained model (recommended for training)
+# model = YOLO('runs/detect/train75/weights/best.pt')
 # model = YOLO('tinyissimoyolo.yaml')  # load a pretrained model (recommended for training)
 # model = YOLO('tinyissimoyolo.yaml')  # load a pretrained model (recommended for training)
 # model = YOLO('pizzayolo.yaml')  # load a pretrained model (recommended for training)
 # model = YOLO('yolov5p.yaml')  # load a pretrained model (recommended for training)
-
 # Train the model
-model.train(data='VOC.yaml',
-            imgsz=256,
-            epochs=1500, 
-            batch=64,
+model.train(data='VisDrone.yaml',
+            imgsz=1024,
+            epochs=30, 
+            batch=1,
+            scale=0.0,
+            mosaic=0.0,
+            translate=0.0
 )
 
 # Size
