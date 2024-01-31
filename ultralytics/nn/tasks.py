@@ -210,6 +210,42 @@ class BaseModel(nn.Module):
         if verbose:
             LOGGER.info(f'Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights')
 
+    def remove_image_padding(self, image):
+        """
+        Remove padding from image.
+        
+        Args:
+            image (torch.Tensor): The image tensor to remove padding from.
+            
+        Returns:
+            naked_image (torch.Tensor): The image tensor with padding removed.
+        """
+        print(f'image shape before: {image.shape}')
+        # The padding pixels all have the same color value, so we can just check the first pixel and remove all pixels with that value
+        first_pixel = image[0, 0, 0]
+        
+        # Find the indices of the top left corner where the padding starts
+        width = image.shape[1]
+        height = image.shape[0]
+        top_left = None
+
+        for i in range(height):
+            for j in range(width):
+                if image[i, j, 0] != first_pixel:
+                    top_left = (i, j)
+                    break
+            if top_left is not None:
+                break
+
+        # With the assumption of symmetric padding, we can calculate the other corners
+        top_right = (top_left[0], width - top_left[1])
+        bottom_left = (height - top_left[0], top_left[1])
+        naked_image = image[top_left[0]:bottom_left[0], top_left[1]:top_right[1]]
+
+        print(f'image shape after: {naked_image.shape}')
+        return naked_image
+
+
     def loss(self, batch, preds=None):
         """
         Compute loss
@@ -221,8 +257,38 @@ class BaseModel(nn.Module):
         if not hasattr(self, 'criterion'):
             self.criterion = self.init_criterion()
 
-        preds = self.forward(batch['img']) if preds is None else preds
-        return self.criterion(preds, batch)
+        # TODO: Split images from input batch into tiles
+        # In theory it should not be necessary to also create tiled labels since the tiles
+        # will be stitched back together before being passed to the loss function.
+
+        # Downsample factor
+        scale_factor = 4
+
+        # Calculate the new width and height after downsampling
+        new_width = int(batch['img'].shape[2] * scale_factor)
+        new_height = int(batch['img'].shape[3] * scale_factor)
+
+        # Perform downsampling using bilinear interpolation
+        downsampled_tensor = nn.functional.interpolate(batch['img'],
+                                                       size=(new_width, new_height),
+                                                       mode='bilinear', align_corners=False)
+        # Show first image in batch with opencv
+        plot_image = batch['img'][0].permute(1, 2, 0).cpu().numpy()
+        naked_image = self.remove_image_padding(plot_image)
+        import cv2
+        cv2.imshow('image', plot_image)
+        cv2.imshow('naked_image', naked_image)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()   
+
+        # preds = self.forward(batch['img']) if preds is None else preds
+        preds = self.forward(downsampled_tensor) if preds is None else preds
+        print(f'preds shape: {preds[0].shape}')
+
+        # TODO: Fuse the predictions from each tile back together before passing the predictions to the loss function
+        return_value = self.criterion(preds, batch)
+        # return self.criterion(preds, batch)
+        return return_value
 
     def init_criterion(self):
         raise NotImplementedError('compute_loss() needs to be implemented by task heads')
