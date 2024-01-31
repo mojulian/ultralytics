@@ -1,5 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -152,7 +154,7 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def __call__(self, preds, batch):
+    def __call__(self, preds, batch, plot=False):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -175,6 +177,39 @@ class v8DetectionLoss:
 
         # pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+
+        if plot:
+            first_img = batch['img'][0]
+            # Get height and width of first image
+            height, width = first_img.shape[1], first_img.shape[2]
+            # Convert first image to RGB numpy array with uint8 datatype
+            first_img = first_img.permute(1, 2, 0).cpu().numpy()
+            first_img_copy = first_img.copy()
+            # # create white image of size 256x256
+            # white_img = np.ones((256, 256, 3), dtype=np.uint8) * 200
+
+            stride = int(self.stride[0].cpu().numpy())
+            # stride = 16
+            # Plot pred_boxes in first image
+            for box, class_scores in zip(pred_bboxes[0], pred_scores[0]):
+                # Only plot boxes with confidence > 0.5
+                # convert class_scores to probabilities
+                class_scores = torch.nn.functional.softmax(class_scores)
+                # class_scores = class_scores.sigmoid()
+                if class_scores.max() < 0.3:
+                    continue
+                else:
+                    x1, y1, x2, y2 = box
+                    x1, y1, x2, y2 = int(stride*x1), int(stride*y1), int(stride*x2), int(stride*y2)
+                    # set values to zero if they are negative
+                    x1, y1, x2, y2 = max(0, x1), max(0, y1), max(0, x2), max(0, y2)
+                    # if values are greater than 255, set them to 255
+                    x1, y1, x2, y2 = min(width-1, x1), min(height-1, y1), min(width-1, x2), min(height-1, y2)
+                    # cv2.rectangle(first_img, (5, 5), (50, 50), (0, 0, 255), 2)
+                    cv2.rectangle(first_img_copy, (x1, y2), (x2, y1), (0, 0, 255), 2)
+            
+            cv2.imshow("First Image", first_img_copy)
+            cv2.waitKey(0)
 
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             pred_scores.detach().sigmoid(), (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
