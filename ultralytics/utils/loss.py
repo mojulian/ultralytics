@@ -125,7 +125,8 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
+        # self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=self.use_dfl).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max - 1, use_dfl=False).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
@@ -145,18 +146,227 @@ class v8DetectionLoss:
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
-    def bbox_decode(self, anchor_points, pred_dist):
+    def bbox_decode(self, anchor_points, pred_dist, offset=None, scale_factor=1.0):
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
         if self.use_dfl:
             b, a, c = pred_dist.shape  # batch, anchors, channels
+            pred_dist_reshaped = pred_dist.view(b, a, 4, c // 4)
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
+            pred_dist = pred_dist * scale_factor
         return dist2bbox(pred_dist, anchor_points, xywh=False)
+    
+    def stitch_tiled_predictions(self, pred_scores, pred_distri, anchor_points, tile_anchors,
+                                 stride, tile_stride, tile_info, img_wh, preds=None, debug_plot=True, imgs=None):
+        """
+        Stitch the predictions from the tiled images back together.
 
-    def __call__(self, preds, batch, plot=False):
+        Args:
+            pred_scores (torch.Tensor): The prediction scores from the tiled images.
+            pred_distri (torch.Tensor): The prediction distributions from the tiled images.
+            tile_info (dict): The information about the tiles.
+            img_wh (int): The width and height of the original image.
+
+        Returns:
+            stitched_pred_scores (torch.Tensor): The prediction scores from the tiled images stitched back together.
+            stitched_pred_distri (torch.Tensor): The prediction distributions from the tiled images stitched back together.
+                                                    -> Careful: These are still in the tile coordinate frame!
+            pred_bboxes (torch.Tensor): The predicted bounding boxes from the tiled images stitched back together.
+        """
+
+        import random
+        import time
+        start = time.time()
+        argmin_time = 0
+        tile_anchors_frame_conversion_time = 0
+        copying_time = 0
+        looping_over_tiles_time = 0
+        looping_over_anchors_time = 0
+        decoding_time = 0
+        loop_over_matched_indices_time = 0
+        argmin_index_time = 0
+        store_anchor_offsets_time = 0
+        compute_distances_time = 0
+        batch_size = len(tile_info)
+        stitched_pred_scores = torch.zeros(batch_size, anchor_points.shape[0], pred_scores.shape[2], device=pred_scores.device)
+        stitched_pred_distri = torch.zeros(batch_size, anchor_points.shape[0], pred_distri.shape[2], device=pred_distri.device)
+        if preds is not None:
+            stitched_predictions = torch.zeros(batch_size, preds.shape[1], anchor_points.shape[0], device=pred_distri.device)
+        anchor_offsets = torch.zeros(batch_size, anchor_points.shape[0], 4, device=pred_scores.device)
+        # Convert anchors to global frame
+        anchors_global_frame = anchor_points * stride
+        tile_anchors *= tile_stride
+        network_input_wh = int(tile_anchors[-1, 0] + tile_stride / 2)
+        tile_batch_idx = 0
+        for batch_idx in range(batch_size):
+            if debug_plot:
+                # blank_image_ = np.ones((img_wh, img_wh, 3))
+                blank_image_ = imgs[batch_idx].permute(1, 2, 0).cpu().numpy()
+                blank_image = blank_image_.copy()
+                for anchor in anchors_global_frame:
+                    cv2.circle(blank_image, (int(anchor[0]), int(anchor[1])), 2, (0, 0, 1), -1)
+            
+            matched_indices = []
+            looping_over_tiles_start = time.time()
+            matching_mask = torch.zeros_like(anchors_global_frame[:, 0])
+
+            for tile in tile_info[batch_idx]:
+                tile_wh = tile.x_max - tile.x_min
+                tile_to_input = tile_wh / network_input_wh
+                img_to_tile_ratio = img_wh / tile_wh
+                downsample_factor = tile_stride / stride * tile_to_input
+                tile_anchors_frame_conversion_start = time.time()
+                tile_anchors_global_frame = torch.zeros_like(tile_anchors)
+                tile_anchors_global_frame[:,0] = tile_to_input * tile_anchors[:, 0] + tile.x_min
+                tile_anchors_global_frame[:,1] = tile_to_input * tile_anchors[:, 1] + tile.y_min
+                tile_anchors_frame_conversion_end = time.time()
+                tile_anchors_frame_conversion_time += tile_anchors_frame_conversion_end - tile_anchors_frame_conversion_start
+
+                color = (random.randint(0, 255) / 255, random.randint(0, 255) / 255, random.randint(0, 255) / 255)
+
+                looping_over_anchors_start = time.time()
+                for i, tile_anchor in enumerate(tile_anchors_global_frame):
+                    # Find closest anchor point in anchors_global_frame
+                    start_argmin = time.time()
+                    closest_anchor_idx_old = torch.argmin(torch.sum((anchors_global_frame - tile_anchor)**2, dim=1))
+                    end_argmin = time.time()
+                    argmin_time += end_argmin - start_argmin
+                    # Compute distances between tile anchor and global frame anchors
+                    compute_distances_start = time.time()
+                    distances = torch.sum((anchors_global_frame - tile_anchor)**2, dim=1)
+                    compute_distances_end = time.time()
+                    compute_distances_time += compute_distances_end - compute_distances_start
+
+                    loop_over_matched_indices_start = time.time()
+                    # for idx in matched_indices:
+                    #     distances[idx] = float('inf')
+                    distances[matching_mask == 1] = float('inf')
+                    loop_over_matched_indices_end = time.time()
+
+                    # Set distances to infinity where matching mask is 1
+                    
+                    loop_over_matched_indices_time += loop_over_matched_indices_end - loop_over_matched_indices_start
+                    
+                    # Find the closest anchor index
+                    start_argmin_index = time.time()
+                    closest_anchor_idx = torch.argmin(distances)
+                    end_argmin_index = time.time()
+                    argmin_index_time += end_argmin_index - start_argmin_index
+                    # matched_indices.append(closest_anchor_idx.item())
+                    matching_mask[closest_anchor_idx] = 1
+
+                    # Store the distance between the tile anchor and the global frame anchor
+                    store_anchor_offsets_start = time.time()
+                    distance_xy = anchors_global_frame[closest_anchor_idx] - tile_anchor
+                    anchor_offsets[batch_idx, closest_anchor_idx, :2] = distance_xy
+                    anchor_offsets[batch_idx, closest_anchor_idx, 2:] = distance_xy
+                    store_anchor_offsets_end = time.time()
+                    store_anchor_offsets_time += store_anchor_offsets_end - store_anchor_offsets_start
+                    
+                    
+                    # stitched_pred_distri[batch_idx, closest_anchor_idx] = adjusted_pred_distri.view(-1)
+                    copying_start = time.time()
+                    stitched_pred_distri[batch_idx, closest_anchor_idx] = pred_distri[tile_batch_idx, i, :].clone()
+                    stitched_pred_scores[batch_idx, closest_anchor_idx] = pred_scores[tile_batch_idx, i, :].clone()
+                    if preds is not None:
+                        stitched_predictions[batch_idx, :, closest_anchor_idx] = preds[tile_batch_idx, :, i].clone()
+                        x, y, w, h = stitched_predictions[batch_idx, 0, closest_anchor_idx] * tile_to_input,\
+                                     stitched_predictions[batch_idx, 1, closest_anchor_idx] * tile_to_input, \
+                                     stitched_predictions[batch_idx, 2, closest_anchor_idx] * tile_to_input, \
+                                     stitched_predictions[batch_idx, 3, closest_anchor_idx] * tile_to_input
+
+                        x = x + tile.x_min
+                        y = y + tile.y_min
+                        stitched_predictions[batch_idx, 0, closest_anchor_idx] = int(x)
+                        stitched_predictions[batch_idx, 1, closest_anchor_idx] = int(y)
+                        stitched_predictions[batch_idx, 2, closest_anchor_idx] = int(w)
+                        stitched_predictions[batch_idx, 3, closest_anchor_idx] = int(h)
+                    copying_end = time.time()
+                    copying_time += copying_end - copying_start
+
+                    if debug_plot:
+                        cv2.circle(blank_image,
+                                   (int(anchors_global_frame[closest_anchor_idx, 0]), int(anchors_global_frame[closest_anchor_idx, 1])),
+                                   4, color, 1)
+                        cv2.circle(blank_image,
+                                   (int(anchors_global_frame[closest_anchor_idx_old, 0]), int(anchors_global_frame[closest_anchor_idx_old, 1])),
+                                   1, (1, 0, 0), 1)
+                        cv2.circle(blank_image, (int(tile_anchor[0]), int(tile_anchor[1])), 5, color, 1)
+                        if preds is not None:
+                            current_pred = stitched_predictions[batch_idx, :, closest_anchor_idx]
+                            conf = stitched_predictions[batch_idx, 4:, closest_anchor_idx].amax(0)
+                            if conf > 0.01:
+                                x, y, w, h = stitched_predictions[batch_idx, 0, closest_anchor_idx],\
+                                                stitched_predictions[batch_idx, 1, closest_anchor_idx], \
+                                                stitched_predictions[batch_idx, 2, closest_anchor_idx], \
+                                                stitched_predictions[batch_idx, 3, closest_anchor_idx]
+                                x1 = int(x - w / 2)
+                                y1 = int(y - h / 2)
+                                x2 = int(x + w / 2)
+                                y2 = int(y + h / 2)
+                                cv2.rectangle(blank_image, (x1, y2), (x2, y1), color, 2)
+
+                looping_over_tiles_end = time.time()
+                looping_over_anchors_time += looping_over_tiles_end - looping_over_anchors_start
+                if debug_plot:
+                    cv2.rectangle(blank_image, (tile.x_min, tile.y_min), (tile.x_max, tile.y_max), color, 2)
+                
+                tile_batch_idx += 1
+            looping_over_tiles_end = time.time()
+            looping_over_tiles_time += looping_over_tiles_end - looping_over_tiles_start
+
+            decoding_start = time.time()
+            pred_bboxes = self.bbox_decode(anchor_points, stitched_pred_distri, scale_factor=downsample_factor) - anchor_offsets / stride
+            decoding_end = time.time()
+            decoding_time += decoding_end - decoding_start
+            if debug_plot:                
+                # Plot pred_boxes in first image
+                for box, class_scores, anchor in zip(pred_bboxes[batch_idx], stitched_pred_scores[batch_idx], anchor_points):
+                    # Only plot boxes with confidence > 0.3
+                    # convert class_scores to probabilities
+                    class_scores = torch.nn.functional.softmax(class_scores, dim=0)
+                    if class_scores.max() < 0.3:
+                        continue
+                    else:
+                        x1, y1, x2, y2 = box
+                        x1, y1, x2, y2 = int(stride*x1), int(stride*y1), int(stride*x2), int(stride*y2)                        
+                        color = (random.randint(0, 255) / 255, random.randint(0, 255) / 255, random.randint(0, 255) / 255)
+                        cv2.rectangle(blank_image, (x1, y2), (x2, y1), (1, 0, 0), 2)
+
+                # Convert blank_image to uint8
+                blank_image *= 255
+                blank_image = blank_image.astype(np.uint8)
+                cv2.imshow('anchor points', blank_image)
+                cv2.waitKey(0)
+            
+        end = time.time()
+        full_time = end - start
+        # print(f"Stitching time: {full_time}, Argmin time: {argmin_time}")
+        # print(f"Percentages: Argmin: {argmin_time/full_time*100}% Copying: {copying_time/full_time*100}% \
+        #         Tile anchors: {tile_anchors_frame_conversion_time/full_time*100}% \
+        #         Looping over tiles: {looping_over_tiles_time/full_time*100}% \
+        #         Looping over anchors: {looping_over_anchors_time/full_time*100}%\
+        #         Decoding: {decoding_time/full_time*100}% \
+        #         Loop over matched indices: {loop_over_matched_indices_time/full_time*100}% \
+        #         Argmin index: {argmin_index_time/full_time*100}% \
+        #         Store anchor offsets: {store_anchor_offsets_time/full_time*100}%\
+        #         Compute distances: {compute_distances_time/full_time*100}% ")
+        if preds is not None:
+            return stitched_pred_scores, stitched_pred_distri, pred_bboxes, stitched_predictions
+        else:
+            return stitched_pred_scores, stitched_pred_distri, pred_bboxes
+
+    def __call__(self, preds, batch, boxes_anchors_stride=None, plot=False):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        # if isinstance(preds, list) and len(preds) > 1:
+        #     feats = preds[1]
+        # elif isinstance(preds, tuple):
+        #     feats = preds[1]
+        # else:
+        #     feats = preds
+
         feats = preds[1] if isinstance(preds, tuple) else preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1)
@@ -164,10 +374,45 @@ class v8DetectionLoss:
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
 
+        if boxes_anchors_stride is not None:
+            pred_bboxes, anchor_points, stride_tensor = boxes_anchors_stride
+
+        # if batch['tile_info'] is not None:
+        #     tile_anchors, tile_strides = make_anchors(feats, self.stride, 0.5, wh_multiplier=1)
+        #     tile_info = batch['tile_info']
+        #     img_wh = batch['img'].shape[2]
+        #     _, _, _, network_output_wh = feats[0].shape
+        #     network_input_wh = int(network_output_wh * self.stride[0])
+        #     tile_scale = img_wh / network_input_wh
+        #     anchor_points, stride_tensor = make_anchors(feats, self.stride*tile_scale, 0.5, wh_multiplier=8)
+        #     stride = stride_tensor[0, 0]
+        #     tile_stride = tile_strides[0, 0]
+        #     #TODO: This might actually be the best place to stitch the predictions back together
+        #     #      The output should be with the actual batchsize and have the fake number of anchor points
+        #     #      Furthermore, the pred_scores should undergo the same transformation as the pred_distri
+            
+        #     #TODO: Also stitch the inference predictions back together in case of validation where preds is a tuple
+        #     if isinstance(preds, tuple):
+        #         predictions = preds[0]
+        #         pred_scores, pred_distri, pred_bboxes, stitched_predictions\
+        #               = self.stitch_tiled_predictions(pred_scores, pred_distri, anchor_points,
+        #                                               tile_anchors, stride, tile_stride,
+        #                                               tile_info, img_wh, imgs=batch['img'], preds=predictions)
+        #         concatenated = torch.cat((pred_distri, pred_scores), dim=2)
+        #         stitched_feats = torch.reshape(concatenated, (concatenated.shape[0], concatenated.shape[2], int(np.sqrt(concatenated.shape[1])), -1))
+        #     else:
+        #         pred_scores, pred_distri, pred_bboxes = self.stitch_tiled_predictions(pred_scores, pred_distri, anchor_points,
+        #                                                              tile_anchors, stride, tile_stride,
+        #                                                              tile_info, img_wh, imgs=batch['img'])    
+
+        else:
+            anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+            # pboxes
+            pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
-        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # targets
         targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)
@@ -175,41 +420,59 @@ class v8DetectionLoss:
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0)
 
-        # pboxes
-        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+        # if plot and tile_info is not None:
+        #     import random
+        #     for full_img_idx in range(len(batch['img'])):
+        #         full_img = batch['img'][full_img_idx]
+        #         full_img_ = full_img.permute(1, 2, 0).cpu().numpy()
+        #         full_img_np = full_img_.copy()
+        #         height, width = full_img_np.shape[0], full_img_np.shape[1]
+        #         for i in range(len(tile_info[full_img_idx])):
+        #             if full_img_idx > 0:
+        #                 offset = full_img_idx * len(tile_info[full_img_idx - 1])
+        #             else:
+        #                 offset = 0
+        #             img = batch['tiled_img'][i + offset]                
+                    
+        #             img = img.permute(1, 2, 0).cpu().numpy()
+        #             img_copy = img.copy()
 
-        if plot:
-            first_img = batch['img'][0]
-            # Get height and width of first image
-            height, width = first_img.shape[1], first_img.shape[2]
-            # Convert first image to RGB numpy array with uint8 datatype
-            first_img = first_img.permute(1, 2, 0).cpu().numpy()
-            first_img_copy = first_img.copy()
-            # # create white image of size 256x256
-            # white_img = np.ones((256, 256, 3), dtype=np.uint8) * 200
+        #             current_tile = tile_info[full_img_idx][i]
+        #             tile_x_min = current_tile.x_min
+        #             tile_y_min = current_tile.y_min
+        #             tile_wh = current_tile.x_max - current_tile.x_min
+        #             downsaple_factor = tile_wh / img.shape[0]
+        #             stride = int(self.stride[0].cpu().numpy())
 
-            stride = int(self.stride[0].cpu().numpy())
-            # stride = 16
-            # Plot pred_boxes in first image
-            for box, class_scores in zip(pred_bboxes[0], pred_scores[0]):
-                # Only plot boxes with confidence > 0.5
-                # convert class_scores to probabilities
-                class_scores = torch.nn.functional.softmax(class_scores)
-                # class_scores = class_scores.sigmoid()
-                if class_scores.max() < 0.3:
-                    continue
-                else:
-                    x1, y1, x2, y2 = box
-                    x1, y1, x2, y2 = int(stride*x1), int(stride*y1), int(stride*x2), int(stride*y2)
-                    # set values to zero if they are negative
-                    x1, y1, x2, y2 = max(0, x1), max(0, y1), max(0, x2), max(0, y2)
-                    # if values are greater than 255, set them to 255
-                    x1, y1, x2, y2 = min(width-1, x1), min(height-1, y1), min(width-1, x2), min(height-1, y2)
-                    # cv2.rectangle(first_img, (5, 5), (50, 50), (0, 0, 255), 2)
-                    cv2.rectangle(first_img_copy, (x1, y2), (x2, y1), (0, 0, 255), 2)
-            
-            cv2.imshow("First Image", first_img_copy)
-            cv2.waitKey(0)
+        #             # Plot pred_boxes in first image
+        #             for box, class_scores, anchor in zip(pred_bboxes[i + offset], pred_scores[i + offset], anchor_points):
+        #                 # Only plot boxes with confidence > 0.3
+        #                 # convert class_scores to probabilities
+        #                 class_scores = torch.nn.functional.softmax(class_scores)
+        #                 if class_scores.max() < 0.3:
+        #                     continue
+        #                 else:
+        #                     anchor_x, anchor_y = int(anchor[0]*stride), int(anchor[1]*stride)
+        #                     x1, y1, x2, y2 = box
+        #                     x1, y1, x2, y2 = int(stride*x1), int(stride*y1), int(stride*x2), int(stride*y2)
+        #                     # set values to zero if they are negative
+        #                     x1, y1, x2, y2 = max(0, x1), max(0, y1), max(0, x2), max(0, y2)
+        #                     # if values are greater than 255, set them to 255
+        #                     x1, y1, x2, y2 = min(width-1, x1), min(height-1, y1), min(width-1, x2), min(height-1, y2)
+                            
+        #                     x1_full, y1_full, x2_full, y2_full = int(downsaple_factor * x1 + tile_x_min),\
+        #                                                          int(downsaple_factor * y1 + tile_y_min),\
+        #                                                          int(downsaple_factor * x2 + tile_x_min),\
+        #                                                          int(downsaple_factor * y2 + tile_y_min)
+        #                     color = (random.randint(0, 255) / 255, random.randint(0, 255) / 255, random.randint(0, 255) / 255)
+        #                     cv2.rectangle(img_copy, (x1, y2), (x2, y1), color, 2)
+        #                     cv2.circle(img_copy, (anchor_x, anchor_y), 5, color, -1)
+        #                     cv2.rectangle(full_img_np, (x1_full, y2_full), (x2_full, y1_full), color, 2)
+                    
+        #             cv2.imshow("First Image", full_img_np)
+        #             cv2.imshow("Tiled Image", img_copy)
+        #             cv2.waitKey(0)
+        # anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5, wh_multiplier=2.0)
 
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             pred_scores.detach().sigmoid(), (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
@@ -231,6 +494,10 @@ class v8DetectionLoss:
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
 
+        # if preds is not None and 'val' in batch:
+        #     return loss.sum() * batch_size, loss.detach(), (stitched_predictions, stitched_feats)
+        # else:
+        #     return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
         return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 

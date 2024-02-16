@@ -19,6 +19,7 @@ from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8Pose
 from ultralytics.utils.plotting import feature_visualization
 from ultralytics.utils.torch_utils import (fuse_conv_and_bn, fuse_deconv_and_bn, initialize_weights, intersect_dicts,
                                            make_divisible, model_info, scale_img, time_sync)
+from ultralytics.utils.tiling import Tiler
 
 try:
     import thop
@@ -219,242 +220,249 @@ class BaseModel(nn.Module):
         if verbose:
             LOGGER.info(f'Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights')
 
-    def remove_image_padding(self, image):
-        """
-        Remove padding from image.
+    # def remove_image_padding(self, image):
+    #     """
+    #     Remove padding from image.
         
-        Args:
-            image (torch.Tensor): The image tensor to remove padding from.
+    #     Args:
+    #         image (torch.Tensor): The image tensor to remove padding from.
             
-        Returns:
-            naked_image (torch.Tensor): The image tensor with padding removed.
-        """
-        print(f'image shape before: {image.shape}')
+    #     Returns:
+    #         naked_image (torch.Tensor): The image tensor with padding removed.
+    #     """
+    #     print(f'image shape before: {image.shape}')
         
-        _, _, top_left, top_right, bottom_left = self.get_shape_of_image_without_padding(image)
+    #     _, _, top_left, top_right, bottom_left = self.get_shape_of_image_without_padding(image)
 
-        naked_image = image[top_left[0]:bottom_left[0], top_left[1]:top_right[1]]
+    #     naked_image = image[top_left[0]:bottom_left[0], top_left[1]:top_right[1]]
 
-        print(f'image shape after: {naked_image.shape}')
-        return naked_image
+    #     print(f'image shape after: {naked_image.shape}')
+    #     return naked_image
     
-    def get_shape_of_image_without_padding(self, image):
-        """
-        Get the shape of an image without padding.
+    # def get_shape_of_image_without_padding(self, image):
+    #     """
+    #     Get the shape of an image without padding.
         
-        Args:
-            image (torch.Tensor): The image tensor to get the shape of.
+    #     Args:
+    #         image (torch.Tensor): The image tensor to get the shape of.
             
-        Returns:
-            shape (tuple): The shape of the image.
-        """
-        # The padding pixels all have the same color value, so we can just check
-        # the first pixel and remove all pixels with that value
-        first_pixel = image[0, 0, 0]
+    #     Returns:
+    #         shape (tuple): The shape of the image.
+    #     """
+    #     # The padding pixels all have the same color value, so we can just check
+    #     # the first pixel and remove all pixels with that value
+    #     first_pixel = image[0, 0, 0]
         
-        # Find the indices of the top left corner where the padding starts
-        width = image.shape[2]
-        height = image.shape[1]
-        top_left = None
+    #     # Find the indices of the top left corner where the padding starts
+    #     width = image.shape[2]
+    #     height = image.shape[1]
+    #     top_left = None
 
-        for i in range(height):
-            for j in range(width):
-                if image[i, j, 0] != first_pixel:
-                    top_left = (i, j)
-                    break
-            if top_left is not None:
-                break
+    #     for i in range(height):
+    #         for j in range(width):
+    #             if image[i, j, 0] != first_pixel and image[i+1, j+1, 0] != first_pixel:
+    #                 top_left = (i, j)
+    #                 break
+    #         if top_left is not None:
+    #             break
 
-        # With the assumption of symmetric padding, we can calculate the other corners
-        top_right = (top_left[0], width - top_left[1])
-        bottom_left = (height - top_left[0], top_left[1])
-        # get the shape of the image without padding
-        w, h = (bottom_left[0] - top_left[0], top_right[1] - top_left[1])
-        return w, h, top_left, top_right, bottom_left
+    #     # With the assumption of symmetric padding, we can calculate the other corners
+    #     top_right = (top_left[0], width - top_left[1])
+    #     bottom_left = (height - top_left[0], top_left[1])
+    #     # get the shape of the image without padding
+    #     w, h = (bottom_left[0] - top_left[0], top_right[1] - top_left[1])
+    #     return w, h, top_left, top_right, bottom_left
     
-    def get_avg_bbox_area(self, bboxes):
-        """
-        Get the average area of all the bounding boxes in a list of bounding boxes.
+    # def get_avg_bbox_area(self, bboxes):
+    #     """
+    #     Get the average area of all the bounding boxes in a list of bounding boxes.
         
-        Args:
-            bboxes (tensor): The tensor of bounding boxes.
+    #     Args:
+    #         bboxes (tensor): The tensor of bounding boxes.
 
-        Returns:
-            avg_bbox_area (float): The average area of the bounding boxes.
-        """
-        bbox_areas = []
-        for bbox in bboxes:
-            bbox_areas.append(bbox[2] * bbox[3])
-        avg_bbox_area = sum(bbox_areas) / len(bbox_areas)
-        return avg_bbox_area
+    #     Returns:
+    #         avg_bbox_area (float): The average area of the bounding boxes.
+    #     """
+    #     bbox_areas = []
+    #     for bbox in bboxes:
+    #         bbox_areas.append(bbox[2] * bbox[3])
+    #     avg_bbox_area = sum(bbox_areas) / len(bbox_areas)
+    #     return avg_bbox_area
     
-    def get_tile_wh(self, full_image_wh, target_nba, avg_nba):
-        """
-        Get the tile width and height.
+    # def get_tile_wh(self, full_image_wh, target_nba, avg_nba):
+    #     """
+    #     Get the tile width and height.
             
-        Args:
-            full_image_wh (int): The width/height of the full augmented image.
-            tagret_nba (float): The target normalized bbox area.
-            avg_nba (float): The average normalized bbox area.
+    #     Args:
+    #         full_image_wh (int): The width/height of the full augmented image.
+    #         tagret_nba (float): The target normalized bbox area.
+    #         avg_nba (float): The average normalized bbox area.
 
-        Returns:
-            tile_wh (int): The tile width/height.
-        """
-        scale_factor = torch.sqrt(target_nba / avg_nba)
-        tile_wh = torch.ceil(full_image_wh / scale_factor).to(torch.int64)
-        return tile_wh
+    #     Returns:
+    #         tile_wh (int): The tile width/height.
+    #     """
+    #     scale_factor = torch.sqrt(target_nba / avg_nba)
+    #     tile_wh = torch.ceil(full_image_wh / scale_factor).to(torch.int64)
+    #     return tile_wh
     
-    def get_list_of_tiles(self, og_image, avg_bbox_area, target_nba=0.01,
-                          debug_plot=False):
-        """
-        Return a list of tile objects that will be used later to extract tile
-        from the original image.
+    # def get_list_of_tiles(self, og_image, avg_bbox_area, target_nba=0.01,
+    #                       debug_plot=False):
+    #     """
+    #     Return a list of tile objects that will be used later to extract tile
+    #     from the original image.
 
-        Args:
-            og_image (torch.Tensor): The original image with padding.
-            avg_bbox_area (float): The average area of all the bounding boxes in the current
-                                   images normalized by the image resolution.
-            target_nba (float): The target normalized bbox area.
-            debug_plot (bool): A flag to enable plot for debugging.
+    #     Args:
+    #         og_image (torch.Tensor): The original image with padding.
+    #         avg_bbox_area (float): The average area of all the bounding boxes in the current
+    #                                images normalized by the image resolution.
+    #         target_nba (float): The target normalized bbox area.
+    #         debug_plot (bool): A flag to enable plot for debugging.
 
-        Returns:
-            tiles (list): A list of Tile objects.
-        """
-        square_image_wh = max(og_image.shape[1], og_image.shape[2])
-        optimal_tile_overlap = 2 * np.sqrt(avg_bbox_area*square_image_wh**2)
-        tile_wh = self.get_tile_wh(square_image_wh, target_nba, avg_bbox_area)
-        w, h, top_left, _, _ = self.get_shape_of_image_without_padding(og_image)
+    #     Returns:
+    #         tiles (list): A list of Tile objects.
+    #     """
+    #     square_image_wh = max(og_image.shape[1], og_image.shape[2])
+    #     optimal_tile_overlap = 2 * torch.sqrt(avg_bbox_area*square_image_wh**2)
+    #     tile_wh = self.get_tile_wh(square_image_wh, target_nba, avg_bbox_area)
+    #     w, h, top_left, _, _ = self.get_shape_of_image_without_padding(og_image)
 
-        num_tiles_w = torch.ceil(w / tile_wh).to(torch.int64)
-        optimal_overlap_w = False
-        while not optimal_overlap_w:
-            centers_x = torch.linspace(tile_wh / 2, w - tile_wh / 2, steps=num_tiles_w)
-            x_spacing = centers_x[1] - centers_x[0]
-            overlap = tile_wh - x_spacing
-            if overlap < optimal_tile_overlap:
-                num_tiles_w += 1
-            else:
-                optimal_overlap_w = True
+    #     num_tiles_w = torch.ceil(w / tile_wh).to(torch.int64)
+    #     if num_tiles_w == 1:
+    #         centers_x = torch.tensor([w / 2])
+    #     else:
+    #         optimal_overlap_w = False
+    #         while not optimal_overlap_w:
+    #             centers_x = torch.linspace(tile_wh / 2, w - tile_wh / 2, steps=num_tiles_w)
+    #             x_spacing = centers_x[1] - centers_x[0]
+    #             overlap = tile_wh - x_spacing
+    #             if overlap < optimal_tile_overlap:
+    #                 num_tiles_w += 1
+    #             else:
+    #                 optimal_overlap_w = True
 
-        num_tiles_h = torch.ceil(h / tile_wh).to(torch.int64)
-        optimal_overlap_h = False
-        while not optimal_overlap_h:
-            centers_y = torch.linspace(tile_wh / 2, h - tile_wh / 2, steps=num_tiles_h)
-            y_spacing = centers_y[1] - centers_y[0]
-            overlap = tile_wh - y_spacing
-            if overlap < optimal_tile_overlap:
-                num_tiles_h += 1
-            else:
-                optimal_overlap_h = True
+    #     num_tiles_h = torch.ceil(h / tile_wh).to(torch.int64)
+    #     if num_tiles_h == 1:
+    #         centers_y = torch.tensor([h / 2])
+    #     else:
+    #         optimal_overlap_h = False
+    #         while not optimal_overlap_h:
+    #             centers_y = torch.linspace(tile_wh / 2, h - tile_wh / 2, steps=num_tiles_h)
+    #             y_spacing = centers_y[1] - centers_y[0]
+    #             overlap = tile_wh - y_spacing
+    #             if overlap < optimal_tile_overlap:
+    #                 num_tiles_h += 1
+    #             else:
+    #                 optimal_overlap_h = True
 
-        # Adjust for padding
-        centers_x += top_left[0]
-        centers_y += top_left[1]
+    #     # Adjust for padding
+    #     centers_x += top_left[0]
+    #     centers_y += top_left[1]
 
-        tiles = []
+    #     tiles = []
 
-        for x in centers_x:
-            for y in centers_y:
-                x_min = int(x - tile_wh / 2)
-                x_max = int(x_min + tile_wh)
-                y_min = int(y - tile_wh / 2)
-                y_max = int(y_min + tile_wh)
-                tile = Tile(x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
-                tiles.append(tile)
+    #     for x in centers_x:
+    #         for y in centers_y:
+    #             x_min = int(x - tile_wh / 2)
+    #             x_max = int(x_min + tile_wh)
+    #             y_min = int(y - tile_wh / 2)
+    #             y_max = int(y_min + tile_wh)
+    #             tile = Tile(x_min=x_min, x_max=x_max, y_min=y_min, y_max=y_max)
+    #             tiles.append(tile)
 
-        if debug_plot:
-            import cv2
-            import random
-            fake_image = og_image.permute(1, 2, 0).cpu().numpy().copy()
-            for tile in tiles:
-                # create a tuple color for the rectangle where the values for the 
-                # 3 channels are chosen randomly
-                color = [random.randint(0, 255)/ 255, random.randint(0, 255)/ 255,
-                         random.randint(0, 255)/ 255]
-                cv2.rectangle(fake_image, (tile.x_min, tile.y_min),
-                              (tile.x_max, tile.y_max), color, 2)
-                cv2.imshow('fake_image', fake_image)
-                cv2.waitKey(0)
-            cv2.destroyAllWindows()
+    #     if debug_plot:
+    #         import cv2
+    #         import random
+    #         fake_image = og_image.permute(1, 2, 0).cpu().numpy().copy()
+    #         for tile in tiles:
+    #             # create a tuple color for the rectangle where the values for the 
+    #             # 3 channels are chosen randomly
+    #             color = [random.randint(0, 255)/ 255, random.randint(0, 255)/ 255,
+    #                      random.randint(0, 255)/ 255]
+    #             cv2.rectangle(fake_image, (tile.x_min, tile.y_min),
+    #                           (tile.x_max, tile.y_max), color, 2)
+    #             cv2.imshow('fake_image', fake_image)
+    #             cv2.waitKey(0)
+    #         cv2.destroyAllWindows()
 
-        return tiles
+    #     return tiles
 
-    def extract_tile_from_image(self, image, tile, model_input_size=256):
-        """
-        Extract a tile from the image and resize it to the desired size.
+    # def extract_tile_from_image(self, image, tile, model_input_size=256):
+    #     """
+    #     Extract a tile from the image and resize it to the desired size.
 
-        Args:
-            image (torch.Tensor): The image tensor to extract the tile from.
-            tile (Tile): The tile object.
-            model_input_size (int): The size of the input to the model.
+    #     Args:
+    #         image (torch.Tensor): The image tensor to extract the tile from.
+    #         tile (Tile): The tile object.
+    #         model_input_size (int): The size of the input to the model.
 
-        Returns:
-            tile (torch.Tensor): The extracted tile.
-        """
-        image_tile = image[:, tile.y_min:tile.y_max, tile.x_min:tile.x_max]
+    #     Returns:
+    #         tile (torch.Tensor): The extracted tile.
+    #     """
+    #     image_tile = image[:, tile.y_min:tile.y_max, tile.x_min:tile.x_max]
 
-        # Resize the tile to the desired size
-        resized_tile = nn.functional.interpolate(image_tile.unsqueeze(0),
-                                                 size=(model_input_size,model_input_size),
-                                                 mode='bilinear', align_corners=False)
-        return resized_tile.squeeze(0)
+    #     # Resize the tile to the desired size
+    #     resized_tile = nn.functional.interpolate(image_tile.unsqueeze(0),
+    #                                              size=(model_input_size,model_input_size),
+    #                                              mode='bilinear', align_corners=False)
+    #     return resized_tile.squeeze(0)
     
-    def split_image_batch_into_tiles(self, batch, debug_plot=False):
-        """
-        Creates tiled images and labels according to the specifications in the input dictionary.
+    # def split_image_batch_into_tiles(self, batch, debug_plot=False):
+    #     """
+    #     Creates tiled images and labels according to the specifications in the input dictionary.
         
-        Args:
-            batch (dict): The input dictionary containing the images and labels.
-            debug_plot (bool): A flag to enable plot for debugging.
+    #     Args:
+    #         batch (dict): The input dictionary containing the images and labels.
+    #         debug_plot (bool): A flag to enable plot for debugging.
 
-        Returns:
-            tiled_batch (torch.Tensor): The batch of tiled images.
-            tiles_dict (dict): A dictionary containing the information about the tiles.
-        """
+    #     Returns:
+    #         tiled_batch (torch.Tensor): The batch of tiled images.
+    #         tiles_dict (dict): A dictionary containing the information about the tiles.
+    #     """
 
-        tiled_batch = torch.empty(0).to(batch['img'].device)
-        tiles_dict = {}
+    #     tiled_batch = torch.empty(0).to(batch['img'].device)
+    #     tiles_dict = {}
+    #     bs = batch['img'].shape[0]
+    #     for idx in range(bs):
+    #         og_img = batch['img'][idx]
+    #         # Get all bboxes in batch['bboxes'] where batch['batch_idx'] == idx
+    #         bboxes = []
+    #         for bbox_idx, batch_idx in enumerate(batch['batch_idx']):
+    #             if batch_idx == idx:
+    #                 bboxes.append(batch['bboxes'][bbox_idx])
+    #             elif batch_idx > idx:
+    #                 break
 
-        for idx, og_img in enumerate(batch['img']):
-            # Get all bboxes in batch['bboxes'] where batch['batch_idx'] == idx
-            bboxes = []
-            for bbox_idx, batch_idx in enumerate(batch['batch_idx']):
-                if batch_idx == idx:
-                    bboxes.append(batch['bboxes'][bbox_idx])
-                elif batch_idx > idx:
-                    break
+    #         avg_bbox_area = self.get_avg_bbox_area(bboxes)
+    #         tiles_dict[idx] = self.get_list_of_tiles(og_img, avg_bbox_area)
 
-            avg_bbox_area = self.get_avg_bbox_area(bboxes)
-            tiles_dict[idx] = self.get_list_of_tiles(og_img, avg_bbox_area)
+    #         for tile in tiles_dict[idx]:
+    #             tile_img = self.extract_tile_from_image(og_img, tile)
+    #             tiled_batch = torch.cat((tiled_batch, tile_img.unsqueeze(0)))
 
-            for tile in tiles_dict[idx]:
-                tile_img = self.extract_tile_from_image(og_img, tile)
-                tiled_batch = torch.cat((tiled_batch, tile_img.unsqueeze(0)))
+    #         if debug_plot:
+    #             import cv2
+    #             og_image_np_ = og_img.permute(1, 2, 0).cpu().numpy()
+    #             og_image_np = og_image_np_.copy()
+    #             for j in range(len(tiles_dict[idx ])):
+    #                 if idx > 0:
+    #                     offset = idx * len(tiles_dict[idx - 1])
+    #                 else:
+    #                     offset = 0
 
-            if debug_plot:
-                import cv2
-                og_image_np_ = og_img.permute(1, 2, 0).cpu().numpy()
-                og_image_np = og_image_np_.copy()
-                for j in range(len(tiles_dict[idx ])):
-                    if idx > 0:
-                        offset = idx * len(tiles_dict[idx - 1])
-                    else:
-                        offset = 0
+    #                 tiled_image_ = tiled_batch[j + offset].permute(1, 2, 0).cpu().numpy()
+    #                 tiled_image = tiled_image_.copy()
+    #                 cv2.imshow('tiled_image', tiled_image)
 
-                    tiled_image_ = tiled_batch[j + offset].permute(1, 2, 0).cpu().numpy()
-                    tiled_image = tiled_image_.copy()
-                    cv2.imshow('tiled_image', tiled_image)
+    #                 current_tile = tiles_dict[idx][j]
+    #                 cv2.rectangle(og_image_np, (current_tile.x_min, current_tile.y_min),
+    #                               (current_tile.x_max, current_tile.y_max), (0, 255, 0), 2)
+    #                 cv2.imshow('og_image', og_image_np)
+    #                 cv2.waitKey(0)
+    #             cv2.destroyAllWindows()
 
-                    current_tile = tiles_dict[idx][j]
-                    cv2.rectangle(og_image_np, (current_tile.x_min, current_tile.y_min),
-                                  (current_tile.x_max, current_tile.y_max), (0, 255, 0), 2)
-                    cv2.imshow('og_image', og_image_np)
-                    cv2.waitKey(0)
-                cv2.destroyAllWindows()
+    #     return tiled_batch, tiles_dict
 
-            return tiled_batch, tiles_dict
-
-    def loss(self, batch, preds=None):
+    def loss(self, batch, preds=None, boxes_anchors_strides=None):
         """
         Compute loss
 
@@ -464,19 +472,27 @@ class BaseModel(nn.Module):
         """
         if not hasattr(self, 'criterion'):
             self.criterion = self.init_criterion()
-
-        # TODO: Split images from input batch into tiles
-        # In theory it should not be necessary to also create tiled labels since the tiles
-        # will be stitched back together before being passed to the loss function.
-
-        tiled_batch, tile_info = self.split_image_batch_into_tiles(batch, debug_plot=True)
-
-        preds = self.forward(batch['img']) if preds is None else preds
-        # preds = self.forward(downsampled_tensor) if preds is None else preds
-        print(f'preds shape: {preds[0].shape}')
-
-        # TODO: Fuse the predictions from each tile back together before passing the predictions to the loss function
-        return_value = self.criterion(preds, batch)
+        
+        use_tiling = True
+        if use_tiling and preds is None:
+            tiler = Tiler(batch, stride=self.stride)
+            # tiled_batch, tile_info = self.split_image_batch_into_tiles(batch, debug_plot=False)
+            tiled_batch, tile_info = tiler.split_image_batch_into_tiles(debug_plot=False)
+            batch['tile_info'] = tile_info
+            batch['tiled_img'] = tiled_batch
+            preds = self.forward(tiled_batch) if preds is None else preds
+            print(f'number of tiles: {len(tiled_batch)}')
+            # boxes_anchors_strides = None
+            preds, boxes_anchors_strides = tiler.get_stitched_batch(preds)
+        # elif use_tiling and preds is not None:
+        #     tiler = Tiler(batch, stride=self.stride)
+        #     preds, boxes_anchors_strides = tiler.get_stitched_batch(preds)
+        else:
+            batch['tile_info'] = None
+            # boxes_anchors_strides = None
+            preds = self.forward(batch['img']) if preds is None else preds
+        
+        return_value = self.criterion(preds, batch, boxes_anchors_strides)
         # return self.criterion(preds, batch)
         return return_value
 

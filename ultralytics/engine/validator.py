@@ -33,6 +33,7 @@ from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.files import increment_path
 from ultralytics.utils.ops import Profile
 from ultralytics.utils.torch_utils import de_parallel, select_device, smart_inference_mode
+from ultralytics.utils.tiling import Tiler
 
 
 class BaseValidator:
@@ -159,12 +160,37 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                preds = model(batch['img'], augment=self.args.augment)
+                use_tiling = True
+                if use_tiling:
+                    from  torch.cuda.amp import autocast
+                    if isinstance(self.model.stride, int):
+                        stride = torch.tensor([self.model.stride], dtype=torch.float32)
+                    else:
+                        stride = self.model.stride
+                    tiler = Tiler(batch, stride)
+                    tiled_batch, tile_info = tiler.split_image_batch_into_tiles(debug_plot=False)
+                    batch['tile_info'] = tile_info
+                    batch['tiled_img'] = tiled_batch
+                    with autocast():
+                        preds = model(tiled_batch, augment=self.args.augment)
+                    
+                    preds, boxes_anchors_strides = tiler.get_stitched_batch(preds)
+                else:
+                    batch['tile_info'] = None
+                    preds = model(batch['img'], augment=self.args.augment)
 
             # Loss
             with dt[2]:
+                # Create a key in batch that stores a bolean value indicating whether the model is in validation mode
+                batch['val'] = True
                 if self.training:
-                    self.loss += model.loss(batch, preds)[1]
+                    if use_tiling:
+                        _, current_loss = model.loss(batch, preds, boxes_anchors_strides=boxes_anchors_strides)
+                        self.loss += current_loss
+                    else:
+                        self.loss += model.loss(batch, preds)[1]
+                # else:
+                #     _, _, preds = model.loss(batch, preds)
 
             # Postprocess
             with dt[3]:
