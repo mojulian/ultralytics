@@ -243,13 +243,16 @@ class TaskAlignedAssigner(nn.Module):
         return target_labels, target_bboxes, target_scores
 
 
-def make_anchors(feats, strides, grid_cell_offset=0.5):
+def make_anchors(feats, strides, grid_cell_offset=0.5, wh_multiplier=1.0):
     """Generate anchors from features."""
     anchor_points, stride_tensor = [], []
     assert feats is not None
     dtype, device = feats[0].dtype, feats[0].device
     for i, stride in enumerate(strides):
         _, _, h, w = feats[i].shape
+        h = int(h*wh_multiplier)
+        w = int(w*wh_multiplier)
+        stride /= wh_multiplier
         sx = torch.arange(end=w, device=device, dtype=dtype) + grid_cell_offset  # shift x
         sy = torch.arange(end=h, device=device, dtype=dtype) + grid_cell_offset  # shift y
         sy, sx = torch.meshgrid(sy, sx, indexing='ij') if TORCH_1_10 else torch.meshgrid(sy, sx)
