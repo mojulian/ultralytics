@@ -26,11 +26,12 @@ class Tiler:
         self.batch = batch
         self.device = batch['img'].device
         self.reg_max = 16  # Hardcoded!!!!
-        self.no = 74  # Hardcoded!!!!
-        self.nc = 10 # Hardcoded!!!!
+        self.no = 65  # Hardcoded!!!!
+        self.nc = 1 # Hardcoded!!!!
         if self.reg_max > 0:
             self.use_dfl = True
         self.proj = torch.arange(self.reg_max, dtype=torch.float, device=self.device)
+        self.model_input_size = 256
 
     def remove_image_padding(self, image):
             """
@@ -115,9 +116,9 @@ class Tiler:
         """
         scale_factor = torch.sqrt(target_nba / avg_nba)
         tile_wh = torch.ceil(full_image_wh / scale_factor).to(torch.int64)
-        return tile_wh
+        return max(tile_wh, torch.tensor(self.model_input_size, device=self.device))
 
-    def get_list_of_tiles(self, og_image, avg_bbox_area, target_nba=0.01,
+    def get_list_of_tiles(self, og_image, avg_bbox_area, target_nba=0.006,
                             debug_plot=False):
         """
         Return a list of tile objects that will be used later to extract tile
@@ -196,14 +197,13 @@ class Tiler:
 
         return tiles
 
-    def extract_tile_from_image(self, image, tile, model_input_size=256):
+    def extract_tile_from_image(self, image, tile):
         """
         Extract a tile from the image and resize it to the desired size.
 
         Args:
             image (torch.Tensor): The image tensor to extract the tile from.
             tile (Tile): The tile object.
-            model_input_size (int): The size of the input to the model.
 
         Returns:
             tile (torch.Tensor): The extracted tile.
@@ -212,7 +212,7 @@ class Tiler:
 
         # Resize the tile to the desired size
         resized_tile = nn.functional.interpolate(image_tile.unsqueeze(0),
-                                                    size=(model_input_size,model_input_size),
+                                                    size=(self.model_input_size,self.model_input_size),
                                                     mode='bilinear', align_corners=False)
         return resized_tile.squeeze(0)
     
@@ -279,7 +279,8 @@ class Tiler:
         return tiled_batch, tiles_dict
     
     def stitch_tiled_predictions(self, pred_scores, pred_distri, anchor_points, tile_anchors,
-                                 stride, tile_stride, tile_info, img_wh, preds=None, debug_plot=True, imgs=None):
+                                 stride, tile_stride, tile_info, img_wh, preds=None, debug_plot=False,
+                                 imgs=None, plot_anchors=True):
         """
         Stitch the predictions from the tiled images back together.
 
@@ -308,11 +309,12 @@ class Tiler:
         tile_batch_idx = 0
         for batch_idx in range(batch_size):
             if debug_plot:
-                # blank_image_ = np.ones((img_wh, img_wh, 3))
+                class_colors = [(random.randint(0, 255) / 255, random.randint(0, 255) / 255, random.randint(0, 255) / 255) for _ in range(10)]
                 blank_image_ = imgs[batch_idx].permute(1, 2, 0).cpu().numpy()
                 blank_image = blank_image_.copy()
-                for anchor in anchors_global_frame:
-                    cv2.circle(blank_image, (int(anchor[0]), int(anchor[1])), 2, (0, 0, 1), -1)
+                if plot_anchors:
+                    for anchor in anchors_global_frame:
+                        cv2.circle(blank_image, (int(anchor[0]), int(anchor[1])), 2, (0, 0, 1), -1)
 
             matching_mask = torch.zeros_like(anchors_global_frame[:, 0])
 
@@ -332,14 +334,10 @@ class Tiler:
 
                     # Compute distances between tile anchor and global frame anchors
                     distances = torch.sum((anchors_global_frame - tile_anchor)**2, dim=1)
-
-                    # for idx in matched_indices:
-                    #     distances[idx] = float('inf')
                     distances[matching_mask == 1] = float('inf')
                     
                     # Find the closest anchor index
                     closest_anchor_idx = torch.argmin(distances)
-                    # matched_indices.append(closest_anchor_idx.item())
                     matching_mask[closest_anchor_idx] = 1
 
                     # Store the distance between the tile anchor and the global frame anchor
@@ -347,13 +345,12 @@ class Tiler:
                     anchor_offsets[batch_idx, closest_anchor_idx, :2] = distance_xy
                     anchor_offsets[batch_idx, closest_anchor_idx, 2:] = distance_xy
                     
-                    
                     # stitched_pred_distri[batch_idx, closest_anchor_idx] = adjusted_pred_distri.view(-1)
                     stitched_pred_distri[batch_idx, closest_anchor_idx] = pred_distri[tile_batch_idx, i, :].clone()
                     stitched_pred_scores[batch_idx, closest_anchor_idx] = pred_scores[tile_batch_idx, i, :].clone()
                     if preds is not None:
                         stitched_predictions[batch_idx, :, closest_anchor_idx] = preds[tile_batch_idx, :, i].clone()
-                        x, y, w, h = stitched_predictions[batch_idx, 0, closest_anchor_idx] * tile_to_input,\
+                        x, y, w, h = stitched_predictions[batch_idx, 0, closest_anchor_idx] * tile_to_input, \
                                      stitched_predictions[batch_idx, 1, closest_anchor_idx] * tile_to_input, \
                                      stitched_predictions[batch_idx, 2, closest_anchor_idx] * tile_to_input, \
                                      stitched_predictions[batch_idx, 3, closest_anchor_idx] * tile_to_input
@@ -366,25 +363,26 @@ class Tiler:
                         stitched_predictions[batch_idx, 3, closest_anchor_idx] = int(h)
 
                     if debug_plot:
-                        cv2.circle(blank_image,
-                                   (int(anchors_global_frame[closest_anchor_idx, 0]), int(anchors_global_frame[closest_anchor_idx, 1])),
-                                   4, color, 1)
-                        cv2.circle(blank_image,
-                                   (int(anchors_global_frame[closest_anchor_idx_old, 0]), int(anchors_global_frame[closest_anchor_idx_old, 1])),
-                                   1, (1, 0, 0), 1)
-                        cv2.circle(blank_image, (int(tile_anchor[0]), int(tile_anchor[1])), 5, color, 1)
                         if preds is not None:
                             conf = stitched_predictions[batch_idx, 4:, closest_anchor_idx].amax(0)
                             if conf > 0.01:
-                                x, y, w, h = stitched_predictions[batch_idx, 0, closest_anchor_idx],\
-                                                stitched_predictions[batch_idx, 1, closest_anchor_idx], \
-                                                stitched_predictions[batch_idx, 2, closest_anchor_idx], \
-                                                stitched_predictions[batch_idx, 3, closest_anchor_idx]
+                                x, y, w, h = stitched_predictions[batch_idx, 0, closest_anchor_idx], \
+                                             stitched_predictions[batch_idx, 1, closest_anchor_idx], \
+                                             stitched_predictions[batch_idx, 2, closest_anchor_idx], \
+                                             stitched_predictions[batch_idx, 3, closest_anchor_idx]
                                 x1 = int(x - w / 2)
                                 y1 = int(y - h / 2)
                                 x2 = int(x + w / 2)
                                 y2 = int(y + h / 2)
                                 cv2.rectangle(blank_image, (x1, y2), (x2, y1), color, 2)
+                        if plot_anchors:
+                            cv2.circle(blank_image,
+                                   (int(anchors_global_frame[closest_anchor_idx, 0]), int(anchors_global_frame[closest_anchor_idx, 1])),
+                                   4, color, 1)
+                            cv2.circle(blank_image,
+                                    (int(anchors_global_frame[closest_anchor_idx_old, 0]), int(anchors_global_frame[closest_anchor_idx_old, 1])),
+                                    1, (1, 0, 0), 1)
+                            cv2.circle(blank_image, (int(tile_anchor[0]), int(tile_anchor[1])), 5, color, 1)
 
                 if debug_plot:
                     cv2.rectangle(blank_image, (tile.x_min, tile.y_min), (tile.x_max, tile.y_max), color, 2)
@@ -398,13 +396,16 @@ class Tiler:
                     # Only plot boxes with confidence > 0.3
                     # convert class_scores to probabilities
                     class_scores = torch.nn.functional.softmax(class_scores, dim=0)
+                    # get index of class with highest probability
+                    class_idx = torch.argmax(class_scores)
                     if class_scores.max() < 0.3:
                         continue
                     else:
                         x1, y1, x2, y2 = box
                         x1, y1, x2, y2 = int(stride*x1), int(stride*y1), int(stride*x2), int(stride*y2)                        
-                        color = (random.randint(0, 255) / 255, random.randint(0, 255) / 255, random.randint(0, 255) / 255)
-                        cv2.rectangle(blank_image, (x1, y2), (x2, y1), (1, 0, 0), 2)
+                        # color = (random.randint(0, 255) / 255, random.randint(0, 255) / 255, random.randint(0, 255) / 255)
+                        c = class_colors[class_idx]
+                        cv2.rectangle(blank_image, (x1, y2), (x2, y1), c, 2)
 
                 # Convert blank_image to uint8
                 blank_image *= 255
@@ -464,16 +465,26 @@ class Tiler:
                     = self.stitch_tiled_predictions(pred_scores, pred_distri, anchor_points,
                                                     tile_anchors, stride, tile_stride,
                                                     tile_info, img_wh, imgs=self.batch['img'], preds=predictions)
-            concatenated = torch.cat((pred_distri, pred_scores), dim=2)
-            stitched_feats = torch.reshape(concatenated, (concatenated.shape[0], concatenated.shape[2], int(np.sqrt(concatenated.shape[1])), -1))
+            scores_reshaped = torch.reshape(pred_scores, (pred_scores.shape[0], int(np.sqrt(pred_scores.shape[1])), -1, self.nc))
+            distri_reshaped = torch.reshape(pred_distri, (pred_distri.shape[0], int(np.sqrt(pred_distri.shape[1])), -1, self.reg_max * 4,))
+            scores_reshaped = scores_reshaped.permute(0, 3, 1, 2).contiguous()
+            distri_reshaped = distri_reshaped.permute(0, 3, 1, 2).contiguous()
+            stitched_feats = torch.cat((distri_reshaped, scores_reshaped), dim=1)
 
             return (stitched_predictions, [stitched_feats]), (pred_bboxes, anchor_points, stride_tensor)
         else:
             pred_scores, pred_distri, pred_bboxes = self.stitch_tiled_predictions(pred_scores, pred_distri, anchor_points,
                                                                     tile_anchors, stride, tile_stride,
                                                                     tile_info, img_wh, imgs=self.batch['img'])
-            concatenated = torch.cat((pred_distri, pred_scores), dim=2)
-            stitched_feats = torch.reshape(concatenated, (concatenated.shape[0], concatenated.shape[2], int(np.sqrt(concatenated.shape[1])), -1))
+            scores_reshaped = torch.reshape(pred_scores, (pred_scores.shape[0], int(np.sqrt(pred_scores.shape[1])), -1, self.nc))
+            distri_reshaped = torch.reshape(pred_distri, (pred_distri.shape[0], int(np.sqrt(pred_distri.shape[1])), -1, self.reg_max * 4,))
+            scores_reshaped = scores_reshaped.permute(0, 3, 1, 2).contiguous()
+            distri_reshaped = distri_reshaped.permute(0, 3, 1, 2).contiguous()
+            stitched_feats = torch.cat((distri_reshaped, scores_reshaped), dim=1)
+
+            _, pred_scores1 = torch.cat([xi.view(stitched_feats.shape[0], self.no, -1) for xi in [stitched_feats]], 2).split(
+                                                 (self.reg_max * 4, self.nc), 1)
+            pred_scores1 = pred_scores1.permute(0, 2, 1).contiguous()
 
             return [stitched_feats], (pred_bboxes, anchor_points, stride_tensor)
         
