@@ -18,20 +18,22 @@ run = wandb.init(
 from ultralytics import YOLO
 
 # Load a model
-model = YOLO('tinyissimoyolo.yaml').load('runs/detect/train/weights/best.pt')  # load a pretrained model (recommended for training)
+model = YOLO('tinyissimoyolo.yaml').load('runs/detect/train693/weights/best.pt')  # load a pretrained model (recommended for training)
 # model = YOLO('runs/detect/train75/weights/best.pt')
 # model = YOLO('tinyissimoyolo.yaml')  # load a pretrained model (recommended for training)
 # model = YOLO('tinyissimoyolo.yaml')  # load a pretrained model (recommended for training)
 # model = YOLO('pizzayolo.yaml')  # load a pretrained model (recommended for training)
 # model = YOLO('yolov5p.yaml')  # load a pretrained model (recommended for training)
 # Train the model
-model.train(data='VisDrone.yaml',
+model.train(data='CARPK.yaml',
             imgsz=1024,
-            epochs=30, 
-            batch=2,
+            epochs=2, 
+            batch=1,
             scale=0.0,
             mosaic=0.0,
-            translate=0.0
+            translate=0.0,
+            single_cls=True,
+            cls=0.0
 )
 
 # Size
