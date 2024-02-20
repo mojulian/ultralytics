@@ -174,8 +174,8 @@ class v8DetectionLoss:
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
-        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
-
+        # imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = torch.tensor([1024, 1024], device=self.device)
         # targets
         targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
@@ -188,8 +188,76 @@ class v8DetectionLoss:
 
         target_scores_sum = max(target_scores.sum(), 1)
 
+        if plot:
+            import cv2
+            # Plot predictions
+            for i in range(batch_size):
+                img = batch['img'][i].cpu().numpy().transpose(1, 2, 0).copy()
+                # Convert img to uint8
+                img = (img * 255).astype('uint8')
+
+                if isinstance(preds, tuple):
+                    for target_box in target_bboxes[i]:
+                        x1 = target_box[0].int().item()
+                        y1 = target_box[1].int().item()
+                        x2 = target_box[2].int().item()
+                        y2 = target_box[3].int().item()                 
+                        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    val_preds = preds[0][i]
+                    for anc_idx in range(val_preds.shape[1]):
+                        conf = val_preds[4, anc_idx].item()
+                        val_prediction = val_preds[:, anc_idx]
+                        if conf > 0.02:
+                            x = val_preds[0, anc_idx].item()
+                            y = val_preds[1, anc_idx].item()
+                            w = val_preds[2, anc_idx].item()
+                            h = val_preds[3, anc_idx].item()
+
+                            x1 = int((x - w / 2))
+                            y1 = int((y - h / 2))
+                            x2 = int((x + w / 2))
+                            y2 = int((y + h / 2))
+                            
+                            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.imshow('img', img)
+                    cv2.waitKey(0)
+                # else:
+                #     for j, pred_box in enumerate(pred_bboxes[i]):
+                #         class_scores = torch.nn.functional.softmax(pred_scores[i][j], dim=0)
+                #         if class_scores.max() > 0.5:
+                #             x1 = int(pred_box[0].item()*stride_tensor[0])
+                #             y1 = int(pred_box[1].item()*stride_tensor[0])
+                #             x2 = int(pred_box[2].item()*stride_tensor[0])
+                #             y2 = int(pred_box[3].item()*stride_tensor[0])
+                #             cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+                # for j, target_box in enumerate(target_bboxes[i]):
+                #     x1 = target_box[0].int().item()
+                #     y1 = target_box[1].int().item()
+                #     x2 = target_box[2].int().item()
+                #     y2 = target_box[3].int().item()                 
+                #     cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    # anchor_point = anchor_points[j] * stride_tensor[0]
+                    # cv2.circle(img, (int(anchor_point[0].item()), int(anchor_point[1].item())), 2, (0, 0, 255), -1)
+
+                
+                    
+
+                # cv2.imshow('img', img)
+                # cv2.waitKey(0)
+
         # cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        # get index where pred_scores is greater than 0
+        num_class_scores = 0
+        for a_idx, anchor in enumerate(pred_scores[0]):
+            class_scores = torch.nn.functional.softmax(anchor, dim=0)
+            if class_scores.max() > 0.2:
+                num_class_scores += 1
+        #         print(f"Anchor {a_idx} predictions {class_scores}")
+        #         print(f"Anchor {a_idx} targets {torch.nn.functional.softmax(target_scores[0, a_idx], dim=0)}")
+        # print(f"Number of class scores: {num_class_scores}")
         loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # bbox loss
