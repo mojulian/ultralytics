@@ -23,6 +23,41 @@ def select_candidates_in_gts(xy_centers, gt_bboxes, eps=1e-9):
     lt, rb = gt_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
     bbox_deltas = torch.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
     # return (bbox_deltas.min(3)[0] > eps).to(gt_bboxes.dtype)
+    min_bbox_deltas = bbox_deltas.amin(3)
+    return_val = bbox_deltas.amin(3).gt_(eps)
+
+    plot = True
+    if plot:
+        import numpy as np
+        import cv2
+        img_size = 1024
+        blank_image = np.zeros((img_size, img_size, 3), np.uint8)
+
+        for gt_box in gt_bboxes[0]:
+            x1 = int(gt_box[0])
+            y1 = int(gt_box[1])
+            x2 = int(gt_box[2])
+            y2 = int(gt_box[3])
+            cv2.rectangle(blank_image, (x1, y1), (x2, y2), (255, 0, 0), 1)
+        for anchor in xy_centers:
+            anchor_x = int(anchor[0])
+            anchor_y = int(anchor[1])
+            cv2.circle(blank_image, (anchor_x, anchor_y), 2, (0, 255, 0), -1)
+        for i in range(return_val.shape[1]):
+            for j in range(return_val.shape[2]):
+                if return_val[0][i][j] > 0:
+                    anchor_x = int(xy_centers[j][0])
+                    anchor_y = int(xy_centers[j][1])
+                    cv2.circle(blank_image, (anchor_x, anchor_y), 3, (0, 0, 255), -1)
+                    
+                    x1 = int(lt[i][0][0])
+                    y1 = int(lt[i][0][1])
+                    x2 = int(rb[i][0][0])
+                    y2 = int(rb[i][0][1])
+                    cv2.rectangle(blank_image, (x1, y1), (x2, y2), (0, 0, 255), 1)
+        cv2.imshow("image", blank_image)
+        cv2.waitKey(0)
+
     return bbox_deltas.amin(3).gt_(eps)
 
 
@@ -111,7 +146,6 @@ class TaskAlignedAssigner(nn.Module):
 
         mask_pos, align_metric, overlaps = self.get_pos_mask(pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points,
                                                              mask_gt)
-
         target_gt_idx, fg_mask, mask_pos = select_highest_overlaps(mask_pos, overlaps, self.n_max_boxes)
 
         # Assigned target
@@ -123,6 +157,28 @@ class TaskAlignedAssigner(nn.Module):
         pos_overlaps = (overlaps * mask_pos).amax(axis=-1, keepdim=True)  # b, max_num_obj
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
         target_scores = target_scores * norm_align_metric
+
+        plot = False
+        if plot:
+            import numpy as np
+            import cv2
+            stride = 32
+            img_size = 1024
+            blank_image = np.zeros((img_size, img_size, 3), np.uint8)
+            for gt_box in gt_bboxes[0]:
+                x1 = int(gt_box[0])
+                y1 = int(gt_box[1])
+                x2 = int(gt_box[2])
+                y2 = int(gt_box[3])
+                cv2.rectangle(blank_image, (x1, y1), (x2, y2), (255, 0, 0), 1)
+            for target_box in target_bboxes[0]:
+                x1 = int(target_box[0])
+                y1 = int(target_box[1])
+                x2 = int(target_box[2])
+                y2 = int(target_box[3])
+                cv2.rectangle(blank_image, (x1, y1), (x2, y2), (0, 0, 255), 1)
+            cv2.imshow("image1", blank_image)
+            cv2.waitKey(0)
 
         return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
 
