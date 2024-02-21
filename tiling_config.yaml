@@ -4,5 +4,7 @@ target_nba: 0.04
 network_input_size: 256
 dataset_yaml: /home/liam/ultralytics/ultralytics/cfg/datasets/CARPK.yaml
 data_dir: /home/liam/datasets
-mode: train
+mode: test
 keep_empty_tiles: True
+filter_iou_threshold: 0.7
+filter_intersection_ratio_threshold: 0.7

@@ -6,6 +6,7 @@ import os
 
 import numpy as np
 import torch.nn as nn
+import torchvision.ops as ops
 
 from tqdm import tqdm
 from dataclasses import dataclass
@@ -29,20 +30,22 @@ class Tiler:
         self.dataset_yaml = self.config['dataset_yaml']
         self.mode = self.config['mode']
         self.keep_empty_tiles = self.config['keep_empty_tiles']
+        self.filer_iou = self.config['filter_iou_threshold']
+        self.filter_intersection_ratio = self.config['filter_intersection_ratio_threshold']
         self.read_dataset_yaml()
         self.dataset_dir = self.dataset_config['path']
         self.create_new_dirs()
-        if not self.tile_dirs_exist:
-            self.load_dataset()
-            self.get_tiled_splits()
+        # if not self.tile_dirs_exist:
+        #     self.load_dataset()
+        #     self.get_tiled_splits()
 
     def create_new_dirs(self):
         self.new_train_dir = self.dataset_dir + '/train_tiles_target_nba_' + str(self.target_nba) +\
-            '_input_size_' + str(self.model_input_size)
+            '_input_size_' + str(self.model_input_size) + '_mode_' + self.mode
         self.new_val_dir = self.dataset_dir + '/val_tiles_target_nba_' + str(self.target_nba) +\
-            '_input_size_' + str(self.model_input_size)
+            '_input_size_' + str(self.model_input_size) + '_mode_' + self.mode
         self.new_test_dir = self.dataset_dir + '/test_tiles_target_nba_' + str(self.target_nba) +\
-            '_input_size_' + str(self.model_input_size)
+            '_input_size_' + str(self.model_input_size) + '_mode_' + self.mode
         
         # Check if dirs exists
         if os.path.exists(self.new_train_dir):
@@ -53,9 +56,18 @@ class Tiler:
         if not os.path.exists(self.new_val_dir):
             os.makedirs(self.new_val_dir + '/images')
             os.makedirs(self.new_val_dir + '/labels')
-        if not os.path.exists(self.new_test_dir):
+        if os.path.exists(self.new_test_dir):
+            self.tile_dirs_exist = True
+        else:
             os.makedirs(self.new_test_dir + '/images')
             os.makedirs(self.new_test_dir + '/labels')
+
+    def get_split_dataset(self):
+        if not self.tile_dirs_exist:
+            self.load_dataset()
+            self.get_tiled_splits()
+        else:
+            print("Tile directories already exist. If you want to re-tile the dataset, delete the existing tile directories.")
 
     def load_images(self, image_path):
         path = self.dataset_dir + '/' + image_path
@@ -338,8 +350,11 @@ class Tiler:
 
     def write_tiled_images_to_disk(self, tiled_images, tiled_labels, new_dir):
         idx = 0
+        og_filenames = []
         for img, labels in zip(tiled_images, tiled_labels):
-            
+            if img['og_filename'] not in og_filenames:
+                idx = 0
+                og_filenames.append(img['og_filename'])
             yolo_annotations = ""
 
             for instance in labels['boundingBoxes']:
@@ -354,23 +369,28 @@ class Tiler:
             annot_file_path = new_dir + '/labels/' + annotation_name
             with open(annot_file_path, 'w') as f:
                 f.writelines(yolo_annotations)
-            image_name = img['og_filename'].split('.')[0] + '_' + str(idx) + '.png'
+            image_name = img['og_filename'].split('.')[0] + '_' + str(idx).zfill(4) + '.png'
             cv2.imwrite(new_dir + '/images/' + image_name, img['tiled_image'])
             idx += 1
 
     def get_tiled_splits(self):
 
-        tiled_train_images, tiled_train_labels, \
-            train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
-        self.write_tiled_images_to_disk(tiled_train_images, tiled_train_labels, self.new_train_dir)
+        # tiled_train_images, tiled_train_labels, \
+        #     train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
+        # self.write_tiled_images_to_disk(tiled_train_images, tiled_train_labels, self.new_train_dir)
 
-        tiled_val_images, tiled_val_labels, \
-            val_tiles_dict = self.split_images_into_tiles(self.og_val_images, self.og_val_labels)
-        self.write_tiled_images_to_disk(tiled_val_images, tiled_val_labels, self.new_val_dir)
+        # tiled_val_images, tiled_val_labels, \
+        #     val_tiles_dict = self.split_images_into_tiles(self.og_val_images, self.og_val_labels)
+        # self.write_tiled_images_to_disk(tiled_val_images, tiled_val_labels, self.new_val_dir)
         
         tiled_test_images, tiled_test_labels, \
             test_tiles_dict = self.split_images_into_tiles(self.og_test_images, self.og_test_labels)
         self.write_tiled_images_to_disk(tiled_test_images, tiled_test_labels, self.new_test_dir)
+
+        # write the tiles dict to disk
+        with open(self.new_test_dir + '/tiles_dict.yaml', 'w') as f:
+            yaml.dump(test_tiles_dict, f)
+
         
         
     def plot_tiled_images(self, image, tiled_images, tiled_labels, tiles):
@@ -397,6 +417,19 @@ class Tiler:
             cv2.waitKey(0)
         cv2.destroyAllWindows()
 
+    def convert_tiles_dict_to_yaml_compatible(self, tiles_dict):
+
+        tiles_dict_converted = {}
+        for key, value in tiles_dict.items():
+            tiles_dict_converted[key] = {'image_name': value['image_name'], 'tiles': []}
+            for tile in value['tiles']:
+                tiles_dict_converted[key]['tiles'].append({'x_min': tile.x_min,
+                                                 'x_max': tile.x_max,
+                                                 'y_min': tile.y_min,
+                                                 'y_max': tile.y_max})
+        return tiles_dict_converted
+
+
     def split_images_into_tiles(self, images, labels, debug_plot=False):
 
         tiled_images = []
@@ -409,7 +442,8 @@ class Tiler:
             image = image_dict['image']
             img_shape = image.shape
             avg_bbox_area = self.get_avg_bbox_area(image_labels['instances'])
-            tiles_dict[idx] = self.get_list_of_tiles(image, avg_bbox_area)
+            tiles_dict[idx] = {'image_name': image_labels['filename'],
+                                'tiles': self.get_list_of_tiles(image, avg_bbox_area)}
             
             current_tiled_images = []
             current_tiled_labels = []
@@ -417,7 +451,7 @@ class Tiler:
             # for tile in tiles_dict[idx]:
             #     tiled_images.append(self.extract_tile_from_image(image, tile))
             
-            for tile in tiles_dict[idx]:
+            for tile in tiles_dict[idx]['tiles']:
                 # tile = tiles_dict[index]
                 bboxes_list = []
                 number_of_bboxes_in_this_tile = 0
@@ -452,15 +486,174 @@ class Tiler:
                     current_tiled_labels.append(tiled_image_dict)
 
             if debug_plot:
-                self.plot_tiled_images(image, current_tiled_images, current_tiled_labels, tiles_dict[idx])
+                self.plot_tiled_images(image, current_tiled_images, current_tiled_labels, tiles_dict[idx]['tiles'])
 
             tiled_images.extend(current_tiled_images)
             tiled_labels.extend(current_tiled_labels)
 
-            idx += 1        
+            idx += 1
+        tiles_dict = self.convert_tiles_dict_to_yaml_compatible(tiles_dict)
         return tiled_images, tiled_labels, tiles_dict
+
+    def get_intersection(self, bboxes1, bboxes2, equal_boxes=True):
+        intersection = torch.zeros(bboxes1.shape[0], bboxes2.shape[0]).to('cpu')
+
+        for i, bbox1 in enumerate(bboxes1):
+            for j, bbox2 in enumerate(bboxes2):
+                if equal_boxes and i == j:
+                    intersection[i, j] = 0
+                    continue
+                x1 = max(bbox1[0], bbox2[0])
+                y1 = max(bbox1[1], bbox2[1])
+                x2 = min(bbox1[2], bbox2[2])
+                y2 = min(bbox1[3], bbox2[3])
+                intersection[i, j] = max(0, x2 - x1) * max(0, y2 - y1)
+     
+        return intersection
+    
+    def get_intersection_ratio(self, bboxes, intersection):
+        area = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+        ratio = intersection / area
+        return ratio
+    
+    def get_all_bboxes_and_confs(self, stitched_pres):
+        all_bboxes = torch.empty(0, 4).to('cpu')
+        all_confs = []
+        for tile_idx in stitched_pres:
+            tile = stitched_pres[tile_idx]
+            bboxes = tile['predictions']
+            for instance in bboxes:
+                all_bboxes = torch.cat((all_bboxes, torch.tensor([instance['bbox']]).to('cpu')))
+                conf = instance['conf'].to('cpu')
+                all_confs.append(conf)
+
+        all_confs = torch.tensor(np.asarray(all_confs)).to('cpu')
+
+        return all_bboxes, all_confs
+    
+    def get_intersection_ratio_mask(self, bboxes):
+        intersection = self.get_intersection(bboxes, bboxes)
+        intersection_ratio = self.get_intersection_ratio(bboxes, intersection)
+        max_ratio = torch.amax(intersection_ratio, dim=0)
+        mask = torch.where(max_ratio < self.filter_intersection_ratio, True, False)
+
+        return mask
+
+    def non_max_suppression(self, stitched_preds):
+        """ For all bboxes check the iou with all other boxes and if the iou is higher than the threshold, remove the
+        bbox that is smaller. """
+
+        all_bboxes, all_confs = self.get_all_bboxes_and_confs(stitched_preds)
+        
+        iou_mask = ops.nms(all_bboxes, all_confs, iou_threshold=self.filer_iou)
+        remaining_bboxes = all_bboxes[iou_mask]
+        remaining_confs = all_confs[iou_mask]
+
+        ratio_mask = self.get_intersection_ratio_mask(remaining_bboxes)
+        remaining_bboxes = remaining_bboxes[ratio_mask]
+        remaining_confs = remaining_confs[ratio_mask]
+            
+        return remaining_bboxes, remaining_confs
+    
+    def merge_bboxes(self, stitched_preds):
+
+        all_bboxes, all_confs = self.get_all_bboxes_and_confs(stitched_preds)
+
+        iou = ops.box_iou(all_bboxes, all_bboxes)
+        intersection = self.get_intersection(all_bboxes, all_bboxes)
+        intersection_ratio = self.get_intersection_ratio(all_bboxes, intersection)
+
+        # Group bboxes that have a high iou or high intersection ratio
+        all_correspondence_ids = []
+        # for i in range(iou.shape[0]):
+        #     if i not in [cors for cors in all_correspondence_ids]:
+        #         # correspondence_ids = [i]
+        #         for j in range(iou.shape[1]):
+        #             if iou[i, j] > self.filer_iou or intersection_ratio[i, j] > self.filter_intersection_ratio:
+        #                 if j not in [cors for cors in all_correspondence_ids]:
+        #                     correspondence_ids = [i, j]
+        #                 else:
+        #                     # Find the group that j is in and add i to that group
+        #                     for group in all_correspondence_ids:
+        #                         if j in group:
+        #                             group.append(i)
+        #                             break
+
+        #         all_correspondence_ids.append(correspondence_ids)
+
+        for i in range(iou.shape[0]):
+                correspondence_ids = [i]
+                for j in range(iou.shape[1]):
+                    if j == i:
+                        continue
+                    if iou[i, j] > self.filer_iou or intersection_ratio[i, j] > self.filter_intersection_ratio:
+                        correspondence_ids.append(j)
+                all_correspondence_ids.append(correspondence_ids)
+
+        merged_sets = self.merge_sets(all_correspondence_ids)
+
+        # Convert sets back to lists and sort them
+        unique_correspondences = [sorted(list(s)) for s in merged_sets]
+
+        # Merge the bboxes that are in the same group
+        merged_bboxes = []
+        merged_confs = []
+        for correspondence_ids in unique_correspondences:
+            bboxes = all_bboxes[correspondence_ids]
+            confs = all_confs[correspondence_ids]
+            x1 = torch.amin(bboxes[:, 0])
+            y1 = torch.amin(bboxes[:, 1])
+            x2 = torch.amax(bboxes[:, 2])
+            y2 = torch.amax(bboxes[:, 3])
+            merged_bboxes.append([x1, y1, x2, y2])
+            merged_confs.append(torch.amax(confs))
+
+
+        return merged_bboxes, merged_confs
+
+    def merge_sets(self, list_of_sets):
+        merged = []
+        for s in list_of_sets:
+            added = False
+            for m in merged:
+                if any(x in m for x in s):
+                    m.update(s)
+                    added = True
+                    break
+            if not added:
+                merged.append(set(s))
+        return merged
+    
+    def stitch_tiled_predictions(self, tiled_predictions, tiles_dict, image_name):
+        for idx in tiles_dict:
+            if tiles_dict[idx]['image_name'].split('.')[0] == image_name.split('.')[0]:
+                tile_info = tiles_dict[idx]['tiles']
+                tile_wh = tile_info[0]['x_max'] - tile_info[0]['x_min']
+                break
+        
+        stitched_predictions = {}
+        for tile_idx, (tile, pred) in enumerate(zip(tile_info, tiled_predictions)):
+            stitched_predictions[tile_idx] = {'tile': {'x_min': tile['x_min'],
+                                                     'x_max': tile['x_max'],
+                                                     'y_min': tile['y_min'],
+                                                     'y_max': tile['y_max']},
+                                            'predictions': []}
+            for box, conf in zip(pred.boxes.xyxy, pred.boxes.conf):
+                x1, y1, x2, y2 = box
+                x1 = x1 * tile_wh/self.model_input_size + tile['x_min']
+                x2 = x2 * tile_wh/self.model_input_size + tile['x_min']
+                y1 = y1 * tile_wh/self.model_input_size + tile['y_min']
+                y2 = y2 * tile_wh/self.model_input_size + tile['y_min']
+                stitched_predictions[tile_idx]['predictions'].append({'bbox': [x1, y1, x2, y2],
+                                                                      'conf': conf})
+                
+        # filtered_bboxes, filtered_confs = self.non_max_suppression(stitched_predictions)
+        filtered_bboxes, filtered_confs = self.merge_bboxes(stitched_predictions)
+
+        return stitched_predictions, filtered_bboxes, filtered_confs
 
 
 if __name__ == "__main__":
     tiler = Tiler('/home/liam/ultralytics/tiling_config.yaml')
+    tiler.get_split_dataset()
     a=1
