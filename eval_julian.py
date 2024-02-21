@@ -28,7 +28,7 @@ def load_test_images(dir):
         images[image] = sorted(images[image])
     return images
 
-def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, conf_thresh=0.8):
+def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, conf_thresh=0.6):
 
     filtered_image = og_image.copy()
     for tile_idx in stitched_preds:
@@ -60,13 +60,31 @@ model = YOLO('runs/detect/train782/weights/best.pt')  # load a pretrained model 
 tiler = Tiler('/home/liam/ultralytics/tiling_config.yaml')
 tiles_dict_path = '/home/liam/datasets/CARPK/test_tiles_target_nba_0.04_input_size_256_mode_test/tiles_dict.yaml'
 original_image_dir = '/home/liam/datasets/CARPK/CARPK_test/images'
+original_labels_dir = '/home/liam/datasets/CARPK/CARPK_test/labels'
 tiles_dict = yaml.safe_load(open(tiles_dict_path))
 
 # TODO: structure the inference in a way that groups the predictions by original image
 for image in test_images:
     og_image = cv2.imread(os.path.join(original_image_dir, image))
+    og_labels_path = os.path.join(original_labels_dir, image.replace('png', 'txt'))
+    with open(os.path.join(og_labels_path), 'r') as f:
+        instances = f.read().splitlines()
+        instances = [instance.split(' ') for instance in instances]
+        instances_float = []
+        for instance in instances:
+            instances_float.append([float(coord) for coord in instance])
+
+    gt_object_count = len(instances_float)
     result = model(test_images[image], stream=True)
-    # image_name = os.path.basename(image)
+    
     stitched_preds, filtered_boxes, filtered_conf \
           = tiler.stitch_tiled_predictions(result, tiles_dict, image)
+    predicted_object_count = 0
+    for conf in filtered_conf:
+        if conf > 0.6:
+            predicted_object_count += 1
+    
+    print(f"Ground truth object count: {gt_object_count}")
+    print(f"Predicted object count: {predicted_object_count}")
+    print(f'Object Count MAE: {abs(gt_object_count - predicted_object_count)}')
     plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image)
