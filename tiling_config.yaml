@@ -1,0 +1,8 @@
+
+
+target_nba: 0.04
+network_input_size: 256
+dataset_yaml: /home/liam/ultralytics/ultralytics/cfg/datasets/CARPK.yaml
+data_dir: /home/liam/datasets
+mode: train
+keep_empty_tiles: True
