@@ -10,6 +10,7 @@ import torchvision.ops as ops
 
 from tqdm import tqdm
 from dataclasses import dataclass
+from itertools import combinations
 
 @dataclass
 class Tile:
@@ -375,19 +376,21 @@ class Tiler:
 
     def get_tiled_splits(self):
 
-        # tiled_train_images, tiled_train_labels, \
-        #     train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
-        # self.write_tiled_images_to_disk(tiled_train_images, tiled_train_labels, self.new_train_dir)
+        tiled_train_images, tiled_train_labels, \
+            train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
+        self.write_tiled_images_to_disk(tiled_train_images, tiled_train_labels, self.new_train_dir)
+        with open(self.new_train_dir + '/tiles_dict.yaml', 'w') as f:
+            yaml.dump(train_tiles_dict, f)
 
-        # tiled_val_images, tiled_val_labels, \
-        #     val_tiles_dict = self.split_images_into_tiles(self.og_val_images, self.og_val_labels)
-        # self.write_tiled_images_to_disk(tiled_val_images, tiled_val_labels, self.new_val_dir)
-        
+        tiled_val_images, tiled_val_labels, \
+            val_tiles_dict = self.split_images_into_tiles(self.og_val_images, self.og_val_labels)
+        self.write_tiled_images_to_disk(tiled_val_images, tiled_val_labels, self.new_val_dir)
+        with open(self.new_val_dir + '/tiles_dict.yaml', 'w') as f:
+            yaml.dump(val_tiles_dict, f)
+
         tiled_test_images, tiled_test_labels, \
             test_tiles_dict = self.split_images_into_tiles(self.og_test_images, self.og_test_labels)
         self.write_tiled_images_to_disk(tiled_test_images, tiled_test_labels, self.new_test_dir)
-
-        # write the tiles dict to disk
         with open(self.new_test_dir + '/tiles_dict.yaml', 'w') as f:
             yaml.dump(test_tiles_dict, f)
 
@@ -555,7 +558,7 @@ class Tiler:
             
         return remaining_bboxes, remaining_confs
     
-    def merge_bboxes(self, stitched_preds):
+    def merge_bboxes(self, stitched_preds, plot=False):
 
         all_bboxes, all_confs = self.get_all_bboxes_and_confs(stitched_preds)
 
@@ -563,37 +566,35 @@ class Tiler:
         intersection = self.get_intersection(all_bboxes, all_bboxes)
         intersection_ratio = self.get_intersection_ratio(all_bboxes, intersection)
 
-        # Group bboxes that have a high iou or high intersection ratio
         all_correspondence_ids = []
-        # for i in range(iou.shape[0]):
-        #     if i not in [cors for cors in all_correspondence_ids]:
-        #         # correspondence_ids = [i]
-        #         for j in range(iou.shape[1]):
-        #             if iou[i, j] > self.filer_iou or intersection_ratio[i, j] > self.filter_intersection_ratio:
-        #                 if j not in [cors for cors in all_correspondence_ids]:
-        #                     correspondence_ids = [i, j]
-        #                 else:
-        #                     # Find the group that j is in and add i to that group
-        #                     for group in all_correspondence_ids:
-        #                         if j in group:
-        #                             group.append(i)
-        #                             break
-
-        #         all_correspondence_ids.append(correspondence_ids)
-
         for i in range(iou.shape[0]):
-                correspondence_ids = [i]
-                for j in range(iou.shape[1]):
-                    if j == i:
-                        continue
-                    if iou[i, j] > self.filer_iou or intersection_ratio[i, j] > self.filter_intersection_ratio:
-                        correspondence_ids.append(j)
-                all_correspondence_ids.append(correspondence_ids)
+            correspondence_ids = [i]
+            for j in range(iou.shape[1]):
+                if j == i:
+                    continue
+                if intersection_ratio[i, j] > self.filter_intersection_ratio:
+                    correspondence_ids.append(j)
+            all_correspondence_ids.append(correspondence_ids)
 
         merged_sets = self.merge_sets(all_correspondence_ids)
-
-        # Convert sets back to lists and sort them
+    
         unique_correspondences = [sorted(list(s)) for s in merged_sets]
+
+        if plot:
+            # fake_image = np.zeros((720, 1280, 3), dtype=np.uint8)
+            fake_image = cv2.imread('/home/liam/datasets/CARPK/merge_debug/og/images/20160331_NTU_00066.png')
+            for group_num, group in enumerate(unique_correspondences):
+                print(f'Group {group_num}')
+                color = [random.randint(0, 255), random.randint(0, 255),
+                            random.randint(0, 255)]
+                for i in group:
+                    print(f'Instance {i}')
+                    x1, y1, x2, y2 = all_bboxes[i]
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    cv2.rectangle(fake_image, (x1, y1), (x2, y2), color, 2)
+                cv2.imshow('fake_image', fake_image)
+                cv2.waitKey(0)
+            cv2.destroyAllWindows()
 
         # Merge the bboxes that are in the same group
         merged_bboxes = []
@@ -612,17 +613,18 @@ class Tiler:
         return merged_bboxes, merged_confs
 
     def merge_sets(self, list_of_sets):
-        merged = []
-        for s in list_of_sets:
-            added = False
-            for m in merged:
-                if any(x in m for x in s):
-                    m.update(s)
-                    added = True
+        result = [set(x) for x in list_of_sets]
+        fixedPoint = False
+        while not fixedPoint:
+            fixedPoint = True
+            for x, y in combinations(result, 2):
+                if x & y:
+                    x.update(y)
+                    result.remove(y)
+                    fixedPoint = False
                     break
-            if not added:
-                merged.append(set(s))
-        return merged
+
+        return result
     
     def stitch_tiled_predictions(self, tiled_predictions, tiles_dict, image_name):
         for idx in tiles_dict:
