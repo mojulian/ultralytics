@@ -153,7 +153,7 @@ if __name__ == "__main__":
     # original_labels_dir = '/home/liam/datasets/CARPK/merge_debug/og/labels'
 
     for image in tqdm(test_images):
-        print(f"Processing {image}")
+        # print(f"Processing {image}")
         og_image = cv2.imread(os.path.join(original_image_dir, image))
         og_labels_path = os.path.join(original_labels_dir, image.replace('png', 'txt'))
         with open(os.path.join(og_labels_path), 'r') as f:
@@ -169,7 +169,7 @@ if __name__ == "__main__":
         stitched_preds, filtered_boxes, filtered_conf \
             = tiler.stitch_tiled_predictions(result, tiles_dict, image)
         
-        count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes, filtered_conf, og_image, plot=True)
+        count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes, filtered_conf, og_image, plot=False)
         full_count_mae.append(count_mae)
         full_precision.append(pr)
         full_recall.append(re)

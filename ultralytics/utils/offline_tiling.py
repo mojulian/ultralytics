@@ -352,7 +352,7 @@ class Tiler:
     def write_tiled_images_to_disk(self, tiled_images, tiled_labels, new_dir):
         idx = 0
         og_filenames = []
-        for img, labels in zip(tiled_images, tiled_labels):
+        for img, labels in tqdm(zip(tiled_images, tiled_labels)):
             if img['og_filename'] not in og_filenames:
                 idx = 0
                 og_filenames.append(img['og_filename'])
@@ -366,7 +366,7 @@ class Tiler:
                 h = instance[4]
                 yolo_annotations += (f'{cls} {x:.6f} {y:.6f} {w:.6f} {h:.6f}\n')
 
-            annotation_name = labels['image_name'].split('.')[0] + '_' + str(idx) + '.txt'
+            annotation_name = labels['image_name'].split('.')[0] + '_' + str(idx).zfill(4) + '.txt'
             annot_file_path = new_dir + '/labels/' + annotation_name
             with open(annot_file_path, 'w') as f:
                 f.writelines(yolo_annotations)
@@ -375,6 +375,8 @@ class Tiler:
             idx += 1
 
     def get_tiled_splits(self):
+
+        print("Writing tiled images to disk...")
 
         tiled_train_images, tiled_train_labels, \
             train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
