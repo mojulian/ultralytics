@@ -14,7 +14,7 @@ from ultralytics import YOLO
 from tqdm import tqdm
 
 
-def load_test_images(dir):
+def load_tiled_test_images(dir):
     images = {}
     for filename in os.listdir(dir):
         if filename.endswith(".jpg") or filename.endswith(".png"):
@@ -24,6 +24,17 @@ def load_test_images(dir):
                 images[full_image_name] = []
             
             images[full_image_name].append(os.path.join(dir, filename))
+    # Sort the list for each image
+    for image in images.keys():
+        images[image] = sorted(images[image])
+    return images
+
+def load_test_images(dir):
+    images = {}
+    for filename in os.listdir(dir):
+        if filename.endswith(".jpg") or filename.endswith(".png"):            
+            # images.append(os.path.join(dir, filename.split('/')[-1]))
+            images[filename] = [os.path.join(dir, filename)]
     # Sort the list for each image
     for image in images.keys():
         images[image] = sorted(images[image])
@@ -107,7 +118,8 @@ def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, og_lab
             x1, y1, x2, y2 = instance['bbox']
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             cv2.rectangle(og_image, (x1, y1), (x2, y2), color, 2)
-    cv2.imshow('stitched image', og_image)
+        cv2.imshow('stitched image', og_image)
+        cv2.waitKey(0)
 
     for instance in og_labels:
         xc, yc, w, h = instance[1:5]
@@ -129,17 +141,24 @@ def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, og_lab
 
 if __name__ == "__main__":
 
-    image_set = 'val'
+    image_set = 'test'
     dataset_yaml_path = '/home/liam/ultralytics/ultralytics/cfg/datasets/CARPK.yaml'
     dataset_yaml = yaml.safe_load(open(dataset_yaml_path))
     data_dir = dataset_yaml['path'] + '/'
 
-    test_images = load_test_images(data_dir + dataset_yaml[image_set])
-    tiles_dict = yaml.safe_load(open(data_dir + dataset_yaml[image_set].replace('images', 'tiles_dict') + '.yaml'))
+    use_tiling = False
+
+    
+    if use_tiling:
+        test_images = load_tiled_test_images(data_dir + dataset_yaml[image_set])
+        tiles_dict = yaml.safe_load(open(data_dir + dataset_yaml[image_set].replace('images', 'tiles_dict') + '.yaml'))
+    else:
+        test_images = load_test_images(data_dir + dataset_yaml['original_images'][image_set])
     original_image_dir = data_dir + dataset_yaml['original_images'][image_set]
     original_labels_dir = data_dir + dataset_yaml['original_images'][image_set].replace('images', 'labels')
 
-    model = YOLO('runs/detect/train782/weights/best.pt')  # load a pretrained model (recommended for training)
+    # model = YOLO('runs/detect/train839/weights/best.pt')  # load a pretrained model (recommended for training)
+    model = YOLO('runs/detect/train847/weights/best.pt')  # load a pretrained model (recommended for training)
     tiler = Tiler('/home/liam/ultralytics/tiling_config.yaml')
 
     full_count_mae = []
@@ -147,10 +166,27 @@ if __name__ == "__main__":
     full_recall = []
     full_f1 = []
 
-    # test_images = load_test_images('/home/liam/datasets/CARPK/merge_debug/images')
-    # tiles_dict = yaml.safe_load(open('/home/liam/datasets/CARPK/merge_debug/tiles_dict.yaml'))
-    # original_image_dir = '/home/liam/datasets/CARPK/merge_debug/og/images'
-    # original_labels_dir = '/home/liam/datasets/CARPK/merge_debug/og/labels'
+    # single_image = '/home/liam/carpark.png'
+    # cv_image = cv2.imread(single_image)
+    # resized_image = cv2.resize(cv_image, (512, 512))
+
+    # prediction = model(resized_image)
+
+    
+    # for box in prediction[0].boxes.xyxy:
+    #     x1, y1, x2, y2 = box
+    #     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    #     cv2.rectangle(resized_image, (x1, y1), (x2, y2), (0, 255, 0), 4)
+    # cv2.imshow('filtered image', resized_image)
+    # cv2.waitKey(0)
+    # a=1
+
+    # test_images = load_test_images('/home/liam/datasets/CARPK/merge_debug/target_nba_0_06/images')
+    # tiles_dict = yaml.safe_load(open('/home/liam/datasets/CARPK/merge_debug/target_nba_0_06/tiles_dict.yaml'))
+    # # original_image_dir = '/home/liam/datasets/CARPK/merge_debug/og/images'
+    # original_image_dir = '/home/liam/datasets/CARPK/merge_debug/target_nba_0_06/og/images'
+    # # original_labels_dir = '/home/liam/datasets/CARPK/merge_debug/og/labels'
+    # original_labels_dir = '/home/liam/datasets/CARPK/merge_debug/target_nba_0_06/og/labels'
 
     for image in tqdm(test_images):
         # print(f"Processing {image}")
@@ -165,10 +201,19 @@ if __name__ == "__main__":
 
         gt_object_count = len(instances_float)
         result = model(test_images[image], stream=True)
-        
-        stitched_preds, filtered_boxes, filtered_conf \
-            = tiler.stitch_tiled_predictions(result, tiles_dict, image)
-        
+
+        if use_tiling:
+            stitched_preds, filtered_boxes, filtered_conf \
+                = tiler.stitch_tiled_predictions(result, tiles_dict, image)
+        else:
+            filtered_boxes = []
+            filtered_conf = []
+            for pred in result:
+                for box, conf in zip(pred.boxes.xyxy, pred.boxes.conf):
+                    x1, y1, x2, y2 = box
+                    filtered_boxes.append([x1, y1, x2, y2])
+                    filtered_conf.append(conf)
+        # plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, instances_float)
         count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes, filtered_conf, og_image, plot=False)
         full_count_mae.append(count_mae)
         full_precision.append(pr)
