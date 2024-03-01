@@ -36,9 +36,6 @@ class Tiler:
         self.read_dataset_yaml()
         self.dataset_dir = self.dataset_config['path']
         self.create_new_dirs()
-        # if not self.tile_dirs_exist:
-        #     self.load_dataset()
-        #     self.get_tiled_splits()
 
     def create_new_dirs(self):
         self.new_train_dir = self.dataset_dir + '/train_tiles_target_nba_' + str(self.target_nba) +\
@@ -128,12 +125,13 @@ class Tiler:
         for bbox in bboxes:
             areas.append(bbox[3]* bbox[4])
 
-        return sum(areas) / len(areas)
+        return np.mean(areas)
     
     def get_tile_wh(self, full_image_shape, avg_nba):
         scale_factor = self.target_nba / avg_nba
         img_area = full_image_shape[0] * full_image_shape[1]
         tile_wh = np.ceil(np.sqrt(img_area / scale_factor)).astype(int)
+        tile_wh = min(tile_wh, min(full_image_shape[0], full_image_shape[1]))
         return max(tile_wh, self.model_input_size)
     
     def get_list_of_tiles(self, og_image, avg_bbox_area, debug_plot=False):
@@ -196,7 +194,7 @@ class Tiler:
                                 (tile.x_max, tile.y_max), color, 2)
                 cv2.imshow('fake_image', fake_image)
                 cv2.waitKey(0)
-            cv2.destroyAllWindows()
+            # cv2.destroyAllWindows()
 
         return tiles
     
@@ -374,27 +372,97 @@ class Tiler:
             cv2.imwrite(new_dir + '/images/' + image_name, img['tiled_image'])
             idx += 1
 
-    def get_tiled_splits(self):
+    def compute_area_hist(self, labels, og=False, plot_hist=False):
+        bbox_areas = []
+        for image_labels in labels:
+            if og:
+                bbox_areas.append(self.get_avg_bbox_area(image_labels['instances']))
+            else:
+                bbox_areas.append(self.get_avg_bbox_area(image_labels['boundingBoxes']))
+        # hist, bin_edges = np.histogram(bbox_areas, bins = np.arange(0, 0.1, 0.001))
+        hist, bin_edges = np.histogram(bbox_areas, bins = np.arange(0, 0.01, 0.0002))
+
+        if plot_hist:
+            import matplotlib.pyplot as plt
+            # plt.bar(bin_edges[:-1], hist, width = 0.001)
+            plt.bar(bin_edges[:-1], hist, width = 0.0002)
+            plt.xlim(min(bin_edges), max(bin_edges))
+            plt.show()   
+
+        return hist
+
+    def get_tiled_splits(self, plot_hist=False):
 
         print("Writing tiled images to disk...")
-
+        
+        # Train
         tiled_train_images, tiled_train_labels, \
             train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
         self.write_tiled_images_to_disk(tiled_train_images, tiled_train_labels, self.new_train_dir)
         with open(self.new_train_dir + '/tiles_dict.yaml', 'w') as f:
             yaml.dump(train_tiles_dict, f)
 
+        # Val
         tiled_val_images, tiled_val_labels, \
             val_tiles_dict = self.split_images_into_tiles(self.og_val_images, self.og_val_labels)
         self.write_tiled_images_to_disk(tiled_val_images, tiled_val_labels, self.new_val_dir)
         with open(self.new_val_dir + '/tiles_dict.yaml', 'w') as f:
             yaml.dump(val_tiles_dict, f)
 
+        # Test
         tiled_test_images, tiled_test_labels, \
             test_tiles_dict = self.split_images_into_tiles(self.og_test_images, self.og_test_labels)
         self.write_tiled_images_to_disk(tiled_test_images, tiled_test_labels, self.new_test_dir)
         with open(self.new_test_dir + '/tiles_dict.yaml', 'w') as f:
             yaml.dump(test_tiles_dict, f)
+
+        
+
+        if plot_hist:
+            train_og_hist = self.compute_area_hist(self.og_train_labels, og=True)
+            train_tiled_hist = self.compute_area_hist(tiled_train_labels)
+            val_og_hist = self.compute_area_hist(self.og_val_labels, og=True)
+            val_tiled_hist = self.compute_area_hist(tiled_val_labels)
+            test_og_hist = self.compute_area_hist(self.og_test_labels, og=True)
+            test_tiled_hist = self.compute_area_hist(tiled_test_labels)
+
+            train_og_hist += val_og_hist
+            train_tiled_hist += val_tiled_hist
+
+            eth_blau_40 = np.array([223, 190, 166, 0]) # ETH Blau 40%
+            eth_petrol_80 = np.array([51, 149, 171, 255]) # ETH Petrol 80%
+            eth_pupur_100 = np.array([146, 59, 183, 0]) # ETH Purpur 80%
+            eth_rot = np.array([45, 53, 183, 0]) # ETH Rot 100%
+            eth_green = np.array([98, 115, 19, 0]) # ETH Rot 100%
+            eth_bronze_80 = np.array([165, 133, 66, 255]) # ETH Rot 100%
+            safron = np.array([238, 185, 2, 255])
+            fandango = np.array([164, 3, 111, 255])
+            import matplotlib.pyplot as plt
+            plt.rcParams.update({'font.size': 22})
+            plt.rcParams["font.family"] = "Times New Roman"
+            fig = plt.figure()
+            fig.set_size_inches(10, 15)
+            ax1 = fig.add_subplot(211)
+            ax1.bar(np.arange(0, 0.01, 0.0002)[:-1], train_og_hist, width = 0.0002, color=fandango/255)
+            ax1.bar(np.arange(0, 0.01, 0.0002)[:-1], test_og_hist, width = 0.0002, color=safron/255)
+            ax1.set_xlim(0, 0.01)
+            ax1.set_title('Average NBA in Full Scale Images')
+            # ax1.set_title('Average Normalized Bounding Box Areas in Full Scale Images')
+            ax1.legend(['Train', 'Test'])
+            ax1.set_xlabel('Normalized Bounding Box Area (NBA)')
+            ax1.set_ylabel('Number of Images')
+            ax2 = fig.add_subplot(212)
+            ax2.bar(np.arange(0, 0.01, 0.0002)[:-1], train_tiled_hist, width = 0.0002, color=fandango/255)
+            ax2.bar(np.arange(0, 0.01, 0.0002)[:-1], test_tiled_hist, width = 0.0002, color=safron/255)
+            ax2.set_title('Average NBA in Tiled Images with Target NBA = 0.006')
+            # ax2.set_title('Average Normalized Bounding Box Areas in Tiled Images with Target NBA = 0.006')
+            ax2.legend(['Train', 'Test'])
+            ax2.set_xlabel('Normalized Bounding Box Area (NBA)')
+            ax2.set_ylabel('Number of Images')
+            ax2.set_xlim(0, 0.01)
+            plt.show()
+
+
 
         
         
@@ -403,24 +471,31 @@ class Tiler:
 
         fake_image = image.copy()
         w, h = image.shape[1], image.shape[0]
-        for img, lbls, in zip( tiled_images, tiled_labels):
-            color = [random.randint(0, 255), random.randint(0, 255),
-                     random.randint(0, 255)]
+        for img, lbls, tile in zip( tiled_images, tiled_labels, tiles):
+            # color = [random.randint(0, 255), random.randint(0, 255),
+            #          random.randint(0, 255)]
+            color = [223, 190, 166] # ETH Blau 40%
+            # color = [171, 149, 51] # ETH Petrol 80%
+            # color = [146, 59, 183] # ETH Purpur 80%
+            # color = [45, 53, 183] # ETH Rot 100%
+            
+            cv2.rectangle(fake_image, (tile.x_min, tile.y_min),(tile.x_max, tile.y_max), color, 4)
 
-            tile_img = img.copy()
+            tile_img = img['tiled_image'].copy()
+            print(img['og_filename'])
             for bbox in lbls['boundingBoxes']:
                 x1 = int((bbox[1] - bbox[3] / 2) * self.model_input_size)
                 y1 = int((bbox[2] - bbox[4] / 2) * self.model_input_size)
                 x2 = int((bbox[1] + bbox[3] / 2) * self.model_input_size)
                 y2 = int((bbox[2] + bbox[4] / 2) * self.model_input_size)
-                cv2.rectangle(tile_img, (x1, y1), (x2, y2), color, 2)
+                # cv2.rectangle(tile_img, (x1, y1), (x2, y2), color, 2)
 
             cv2.imshow('tile_image', tile_img)
 
                 
             cv2.imshow('og_image', fake_image)
             cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
 
     def convert_tiles_dict_to_yaml_compatible(self, tiles_dict):
 
@@ -491,6 +566,7 @@ class Tiler:
                     current_tiled_labels.append(tiled_image_dict)
 
             if debug_plot:
+                print(f'AVG NBA: {avg_bbox_area}')
                 self.plot_tiled_images(image, current_tiled_images, current_tiled_labels, tiles_dict[idx]['tiles'])
 
             tiled_images.extend(current_tiled_images)
@@ -584,7 +660,7 @@ class Tiler:
 
         if plot:
             # fake_image = np.zeros((720, 1280, 3), dtype=np.uint8)
-            fake_image = cv2.imread('/home/liam/datasets/CARPK/merge_debug/og/images/20160331_NTU_00066.png')
+            fake_image = cv2.imread('/home/liam/datasets/CARPK/merge_debug/target_nba_0_06/og/images/20161225_TPZ_00240.png')
             for group_num, group in enumerate(unique_correspondences):
                 print(f'Group {group_num}')
                 color = [random.randint(0, 255), random.randint(0, 255),
