@@ -5,6 +5,6 @@ original_images:
   train: CARPK_train/images
   val: CARPK_val/images
 path: ../datasets/CARPK
-test: test_tiles_target_nba_0.06_input_size_256_mode_test/images
-train: train_tiles_target_nba_0.06_input_size_256_mode_test/images
-val: val_tiles_target_nba_0.06_input_size_256_mode_test/images
+test: test_tiles_target_nba_0.04_input_size_256_mode_test/images
+train: train_tiles_target_nba_0.04_input_size_256_mode_test/images
+val: val_tiles_target_nba_0.04_input_size_256_mode_test/images

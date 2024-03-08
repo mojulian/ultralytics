@@ -190,11 +190,10 @@ if __name__ == "__main__":
                     filtered_boxes.append([x1, y1, x2, y2])
                     filtered_conf.append(conf)
         # plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, instances_float)
-        count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes, filtered_conf, og_image, plot=True)
+        count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes, filtered_conf, og_image, plot=False)
         full_count_mae.append(count_mae)
         full_precision.append(pr)
         full_recall.append(re)
         full_f1.append(f1)
-
 
     print(f"Average Count Mae: {np.mean(full_count_mae)}, Average Precision: {np.mean(full_precision)}, Average Recall: {np.mean(full_recall)}, Average F1: {np.mean(full_f1)}")

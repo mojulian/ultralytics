@@ -5,13 +5,12 @@ import yaml
 import os
 
 import numpy as np
-import torch.nn as nn
 import torchvision.ops as ops
 
 from tqdm import tqdm
 from dataclasses import dataclass
-from itertools import combinations
 from typing import Generator, List, Tuple, Union
+from time import time
 
 @dataclass
 class Tile:
@@ -19,6 +18,31 @@ class Tile:
     x_max: int
     y_min: int
     y_max: int
+
+class UnionFind:
+    def __init__(self, n):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+
+    def find(self, x):
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+
+    def union(self, x, y):
+        root_x = self.find(x)
+        root_y = self.find(y)
+
+        if root_x == root_y:
+            return
+
+        if self.rank[root_x] < self.rank[root_y]:
+            self.parent[root_x] = root_y
+        elif self.rank[root_x] > self.rank[root_y]:
+            self.parent[root_y] = root_x
+        else:
+            self.parent[root_y] = root_x
+            self.rank[root_x] += 1
 
 
 class Tiler:
@@ -680,9 +704,9 @@ class Tiler:
             idx += 1
         tiles_dict = self.convert_tiles_dict_to_yaml_compatible(tiles_dict)
         return tiled_images, tiled_labels, tiles_dict
-
+    
     def get_intersection(self, bboxes1: torch.Tensor, bboxes2: torch.Tensor,
-                         equal_boxes: bool=True) -> torch.Tensor:
+                         equal_boxes: bool = True) -> torch.Tensor:
         """
         Get the intersection area between two sets of bboxes.
 
@@ -690,19 +714,19 @@ class Tiler:
         :param bboxes2: Tensor of shape (M, 4) containing the bounding boxes
         :param equal_boxes: Whether to calculate the intersection of a bbox with itself
         """
-        intersection = torch.zeros(bboxes1.shape[0], bboxes2.shape[0]).to('cpu')
+        bboxes1 = bboxes1.unsqueeze(1)
+        bboxes2 = bboxes2.unsqueeze(0)
 
-        for i, bbox1 in enumerate(bboxes1):
-            for j, bbox2 in enumerate(bboxes2):
-                if equal_boxes and i == j:
-                    intersection[i, j] = 0
-                    continue
-                x1 = max(bbox1[0], bbox2[0])
-                y1 = max(bbox1[1], bbox2[1])
-                x2 = min(bbox1[2], bbox2[2])
-                y2 = min(bbox1[3], bbox2[3])
-                intersection[i, j] = max(0, x2 - x1) * max(0, y2 - y1)
-     
+        x1 = torch.max(bboxes1[..., 0], bboxes2[..., 0])
+        y1 = torch.max(bboxes1[..., 1], bboxes2[..., 1])
+        x2 = torch.min(bboxes1[..., 2], bboxes2[..., 2])
+        y2 = torch.min(bboxes1[..., 3], bboxes2[..., 3])
+
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+
+        if equal_boxes:
+            intersection.fill_diagonal_(0)
+
         return intersection
     
     def get_intersection_ratio(self, bboxes: torch.Tensor, intersection: torch.Tensor) -> torch.Tensor:
@@ -775,6 +799,26 @@ class Tiler:
             
         return remaining_bboxes, remaining_confs
     
+    def get_correspondence_ids(self, intersection_ratio: torch.Tensor) -> List[List[int]]:
+        """
+        Get the correspondence ids for the bboxes that have a high intersection ratio with another bbox.
+
+        :param intersection_ratio: Tensor of shape (N, N) containing the intersection ratios
+        :param filter_intersection_ratio: Threshold for filtering intersection ratios
+        :return: all_correspondence_ids: List of correspondence ids
+        """
+        all_correspondence_ids = []
+
+        high_intersection_indices = (intersection_ratio > self.filter_intersection_ratio).nonzero()
+
+        for i in range(intersection_ratio.shape[0]):
+            correspondence_ids = [i]
+            matching_indices = high_intersection_indices[high_intersection_indices[:, 0] == i, 1]
+            correspondence_ids.extend(matching_indices.tolist())
+            all_correspondence_ids.append(correspondence_ids)
+
+        return all_correspondence_ids
+    
     def merge_bboxes(self, stitched_preds: dict, plot: bool=False) -> Tuple[List, List]:
         """ 
         Merge overlapping bounding boxes that belong to the same object based on
@@ -790,20 +834,9 @@ class Tiler:
         """
 
         all_bboxes, all_confs = self.get_all_bboxes_and_confs(stitched_preds)
-
         intersection = self.get_intersection(all_bboxes, all_bboxes)
         intersection_ratio = self.get_intersection_ratio(all_bboxes, intersection)
-
-        all_correspondence_ids = []
-        for i in range(intersection_ratio.shape[0]):
-            correspondence_ids = [i]
-            for j in range(intersection_ratio.shape[1]):
-                if j == i:
-                    continue
-                if intersection_ratio[i, j] > self.filter_intersection_ratio:
-                    correspondence_ids.append(j)
-            all_correspondence_ids.append(correspondence_ids)
-
+        all_correspondence_ids = self.get_correspondence_ids(intersection_ratio)
         merged_sets = self.merge_sets(all_correspondence_ids)
         unique_correspondences = [sorted(list(s)) for s in merged_sets]
 
@@ -836,7 +869,7 @@ class Tiler:
             merged_confs.append(torch.amax(confs))
 
         return merged_bboxes, merged_confs
-
+    
     def merge_sets(self, list_of_sets: List[set]) -> List[set]:
         """
         Merge sets that share at least one value and return a list of sets containing only
@@ -845,18 +878,25 @@ class Tiler:
         :param list_of_sets: List of sets
         :return: List of sets containing only unique values
         """
-        result = [set(x) for x in list_of_sets]
-        fixedPoint = False
-        while not fixedPoint:
-            fixedPoint = True
-            for x, y in combinations(result, 2):
-                if x & y:
-                    x.update(y)
-                    result.remove(y)
-                    fixedPoint = False
-                    break
+        elements = set().union(*list_of_sets)
+        element_to_index = {element: i for i, element in enumerate(elements)}
+        uf = UnionFind(len(elements))
 
-        return result
+        for s in list_of_sets:
+            if len(s) > 1:
+                it = iter(s)
+                root = uf.find(element_to_index[next(it)])
+                for element in it:
+                    uf.union(root, uf.find(element_to_index[element]))
+
+        sets_map = {}
+        for i in range(len(elements)):
+            root = uf.find(i)
+            if root not in sets_map:
+                sets_map[root] = set()
+            sets_map[root].add(elements.pop())  # Pop elements from the set
+
+        return list(sets_map.values())
     
     def stitch_tiled_predictions(self, tiled_predictions: Generator,
                                  tiles_dict: dict, image_name: str) -> Tuple[dict, List, List]:
@@ -893,7 +933,6 @@ class Tiler:
                 y2 = y2 * tile_wh/self.model_input_size + tile['y_min']
                 stitched_predictions[tile_idx]['predictions'].append({'bbox': [x1, y1, x2, y2],
                                                                       'conf': conf})
-                
         filtered_bboxes, filtered_confs = self.merge_bboxes(stitched_predictions)
 
         return stitched_predictions, filtered_bboxes, filtered_confs
