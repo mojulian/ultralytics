@@ -35,7 +35,7 @@ class Tiler:
         self.filer_iou = self.config['filter_iou_threshold']
         self.filter_intersection_ratio = self.config['filter_intersection_ratio_threshold']
         self.read_dataset_yaml()
-        self.dataset_dir = self.dataset_config['path']
+        self.dataset_dir = os.path.abspath(self.dataset_config['path'])
         self.create_new_dirs()
 
     def create_new_dirs(self):
@@ -63,6 +63,14 @@ class Tiler:
         else:
             os.makedirs(self.new_test_dir + '/images')
             os.makedirs(self.new_test_dir + '/labels')
+
+        # Update the dataset yaml
+        self.dataset_config['train'] = self.new_train_dir.split('/')[-1] + '/images'
+        self.dataset_config['val'] = self.new_val_dir.split('/')[-1] + '/images'
+        self.dataset_config['test'] = self.new_test_dir.split('/')[-1] + '/images'
+
+        with open(self.dataset_yaml, 'w') as f:
+            yaml.dump(self.dataset_config, f)
 
     def get_split_dataset(self):
         """
@@ -113,19 +121,19 @@ class Tiler:
         """"
         Load the images and labels from the dataset and sort them by filename.
         """
-        self.og_train_images = self.load_images(self.dataset_config['train'])
+        self.og_train_images = self.load_images(self.dataset_config['original_images']['train'])
         self.og_train_images = sorted(self.og_train_images, key=lambda k: k['filename'])
-        self.og_train_labels = self.load_labels(self.dataset_config['train'])
+        self.og_train_labels = self.load_labels(self.dataset_config['original_images']['train'])
         self.og_train_labels = sorted(self.og_train_labels, key=lambda k: k['filename'])
 
-        self.og_val_images = self.load_images(self.dataset_config['val'])
+        self.og_val_images = self.load_images(self.dataset_config['original_images']['val'])
         self.og_val_images = sorted(self.og_val_images, key=lambda k: k['filename'])
-        self.og_val_labels = self.load_labels(self.dataset_config['val'])
+        self.og_val_labels = self.load_labels(self.dataset_config['original_images']['val'])
         self.og_val_labels = sorted(self.og_val_labels, key=lambda k: k['filename'])
 
-        self.og_test_images = self.load_images(self.dataset_config['test'])
+        self.og_test_images = self.load_images(self.dataset_config['original_images']['test'])
         self.og_test_images = sorted(self.og_test_images, key=lambda k: k['filename'])
-        self.og_test_labels = self.load_labels(self.dataset_config['test'])
+        self.og_test_labels = self.load_labels(self.dataset_config['original_images']['test'])
         self.og_test_labels = sorted(self.og_test_labels, key=lambda k: k['filename'])
 
     def read_dataset_yaml(self) -> None:
@@ -481,7 +489,7 @@ class Tiler:
         
         # Train
         tiled_train_images, tiled_train_labels, \
-            train_tiles_dict = self.ultralytics(self.og_train_images, self.og_train_labels)
+            train_tiles_dict = self.split_images_into_tiles(self.og_train_images, self.og_train_labels)
         self.write_tiled_images_to_disk(tiled_train_images, tiled_train_labels, self.new_train_dir)
         with open(self.new_train_dir + '/tiles_dict.yaml', 'w') as f:
             yaml.dump(train_tiles_dict, f)
@@ -589,7 +597,7 @@ class Tiler:
         return tiles_dict_converted
 
     def split_images_into_tiles(self, images: List, labels: List,
-                                debug_plot: bool=True) -> Tuple[List, List, dict]:
+                                debug_plot: bool=False) -> Tuple[List, List, dict]:
         """
         Split the images into tiles and return the tiled images and labels as well
         as a dictionary containing info about the tiles such that they can be stitched
