@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import cv2
 import yaml
+import argparse
 
 import torchvision.ops as ops
 
@@ -40,7 +41,8 @@ def load_test_images(dir):
         images[image] = sorted(images[image])
     return images
 
-def compute_metrics(gt, pred_boxes, pred_conf, og_image, conf_thresh=0.6, iou_thresh=0.5, plot=False):
+def compute_metrics(gt, pred_boxes, pred_conf, og_image, conf_thresh=0.6,
+                    iou_thresh=0.5, plot=False):
 
     # convert pred to tensor
     pred = torch.tensor(pred_boxes)
@@ -74,7 +76,8 @@ def compute_metrics(gt, pred_boxes, pred_conf, og_image, conf_thresh=0.6, iou_th
     count_mae = abs(num_gt - num_pred)
 
     if plot:
-        print(f"Count Mae: {count_mae}, F1: {f1:.2f}, Precision: {precision:.2f}, Recall: {recall:.2f}, #GT: {num_gt}, #Pred: {num_pred}")
+        print(f"Count Mae: {count_mae}, F1: {f1:.2f}, Precision: {precision:.2f}, \
+              Recall: {recall:.2f}, #GT: {num_gt}, #Pred: {num_pred}")
         filtered_image = og_image.copy()
         for i, instance in enumerate(gt_boxes):
             x1, y1, x2, y2 = instance
@@ -98,14 +101,17 @@ def compute_metrics(gt, pred_boxes, pred_conf, og_image, conf_thresh=0.6, iou_th
 
     return count_mae, precision, recall, f1
 
-def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, og_labels, conf_thresh=0.6):
+def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, 
+                 og_labels, conf_thresh=0.6):
 
     filtered_image = og_image.copy()
     for tile_idx in stitched_preds:
         tile = stitched_preds[tile_idx]['tile']
         instances = stitched_preds[tile_idx]['predictions']
-        color = (np.random.randint(0, 255), np.random.randint(0, 255), np.random.randint(0, 255))
-        cv2.rectangle(og_image, (tile['x_min'], tile['y_min']), (tile['x_max'], tile['y_max']), color, 2)
+        color = (np.random.randint(0, 255), np.random.randint(0, 255),
+                 np.random.randint(0, 255))
+        cv2.rectangle(og_image, (tile['x_min'], tile['y_min']),
+                      (tile['x_max'], tile['y_max']), color, 2)
 
         for instance in instances:
             # if instance['conf'] > conf_thresh:
@@ -117,7 +123,8 @@ def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, og_lab
 
     for instance in og_labels:
         xc, yc, w, h = instance[1:5]
-        xc, yc, w, h = int(xc * og_image.shape[1]), int(yc * og_image.shape[0]), int(w * og_image.shape[1]), int(h * og_image.shape[0])
+        xc, yc, w, h = int(xc * og_image.shape[1]), int(yc * og_image.shape[0]),
+        int(w * og_image.shape[1]), int(h * og_image.shape[0])
         x1 = xc - w//2
         y1 = yc - h//2
         x2 = xc + w//2
@@ -135,9 +142,20 @@ def plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, og_lab
 
 if __name__ == "__main__":
 
-    image_set = 'test'
-    use_tiling = True
-    dataset_yaml_path = 'ultralytics/cfg/datasets/CARPK_tiling.yaml'
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--use-tiling', default=True)
+    parser.add_argument('--perform-iou-sweep', default=False)
+    parser.add_argument('--plot', default=False)
+    parser.add_argument('--image-set', default='test')
+    parser.add_argument('--dataset-yaml-path', default='ultralytics/cfg/datasets/CARPK_tiling.yaml')
+
+
+    args, unknown = parser.parse_known_args()
+
+    image_set = args.image_set
+    iou_sweep = args.perform_iou_sweep
+    use_tiling = args.use_tiling
+    dataset_yaml_path = args.dataset_yaml_path
     
     
     if use_tiling:
@@ -146,7 +164,8 @@ if __name__ == "__main__":
         dataset_yaml = yaml.safe_load(open(dataset_yaml_path))
         data_dir = dataset_yaml['path'] + '/'
         test_images = load_tiled_test_images(data_dir + dataset_yaml[image_set])
-        tiles_dict = yaml.safe_load(open(data_dir + dataset_yaml[image_set].replace('images', 'tiles_dict') + '.yaml'))
+        tiles_dict = yaml.safe_load(open(data_dir + dataset_yaml[image_set].replace('images', 'tiles_dict')
+                                         + '.yaml'))
     else:
         dataset_yaml = yaml.safe_load(open(dataset_yaml_path))
         data_dir = dataset_yaml['path'] + '/'
@@ -155,8 +174,7 @@ if __name__ == "__main__":
     original_image_dir = data_dir + dataset_yaml['original_images'][image_set]
     original_labels_dir = data_dir + dataset_yaml['original_images'][image_set].replace('images', 'labels')
 
-    # model = YOLO('runs/detect/train839/weights/best.pt')  # load a pretrained model (recommended for training)
-    model = YOLO('runs/detect/train782/weights/best.pt')  # load a pretrained model (recommended for training)
+    model = YOLO('runs/detect/train782/weights/best.pt')
     
 
     full_count_mae = []
@@ -164,7 +182,7 @@ if __name__ == "__main__":
     full_recall = []
     full_f1 = []
 
-    for image in tqdm(test_images):
+    for image in tqdm(test_images, position=0, leave=True):
         # print(f"Processing {image}")
         og_image = cv2.imread(os.path.join(original_image_dir, image))
         og_labels_path = os.path.join(original_labels_dir, image.replace('png', 'txt'))
@@ -189,11 +207,26 @@ if __name__ == "__main__":
                     x1, y1, x2, y2 = box
                     filtered_boxes.append([x1, y1, x2, y2])
                     filtered_conf.append(conf)
-        # plot_results(stitched_preds, filtered_boxes, filtered_conf, og_image, instances_float)
-        count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes, filtered_conf, og_image, plot=False)
-        full_count_mae.append(count_mae)
-        full_precision.append(pr)
-        full_recall.append(re)
-        full_f1.append(f1)
+        if iou_sweep:
+            iou_thresh_vals = np.linspace(0.5, 0.95, 10)
+            for iou_thresh in iou_thresh_vals:
+                count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes,
+                                                        filtered_conf, og_image,
+                                                        iou_thresh=iou_thresh,
+                                                        plot=args.plot)
+                full_count_mae.append(count_mae)
+                full_precision.append(pr)
+                full_recall.append(re)
+                full_f1.append(f1)
+        else:
+            count_mae, pr, re, f1 = compute_metrics(instances_float, filtered_boxes,
+                                                    filtered_conf, og_image, plot=args.plot)
+            full_count_mae.append(count_mae)
+            full_precision.append(pr)
+            full_recall.append(re)
+            full_f1.append(f1)
 
-    print(f"Average Count Mae: {np.mean(full_count_mae)}, Average Precision: {np.mean(full_precision)}, Average Recall: {np.mean(full_recall)}, Average F1: {np.mean(full_f1)}")
+    print(f"Average Count Mae: {np.nanmean(full_count_mae)},\
+            Average Precision: {np.nanmean(full_precision)},\
+            Average Recall: {np.mean(full_recall)},\
+            Average F1: {np.nanmean(full_f1)}")
